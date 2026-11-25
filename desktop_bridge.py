@@ -31,6 +31,25 @@ EMPTY_HINT = ("the model used its whole output budget reasoning and returned no 
               "try again, ask a narrower question, or pick a non-reasoning model")
 
 
+RETRY_CODES = (429, 500, 502, 503, 504, 529)
+RETRY_DELAYS = (1.5, 4.0)
+
+TOOL_SPEC = {
+    "name": "run_python",
+    "description": ("Run Python 3 code (standard library only) and get its stdout and stderr back. Use it for any "
+                    "calculation, search or exhaustive check instead of working it out by hand. Print the values you "
+                    "need. 15 second limit, no network, no access to the user's files."),
+    "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "Python source to run"}},
+                   "required": ["code"]},
+}
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, name, code, detail=""):
+        self.code, self.detail = code, detail
+        super().__init__(f"{name}: HTTP {code}" + (f" - {detail[:300]}" if detail else ""))
+
+
 class Provider:
     def __init__(self, name, key="", model=""):
         self.name = name
@@ -41,20 +60,17 @@ class Provider:
         self.usage = []
 
     def request(self, path, body=None):
-        headers = {"Content-Type": "application/json"}
-        if self.name == "anthropic":
-            headers.update({"x-api-key": self.key, "anthropic-version": "2023-06-01"})
-        elif self.key and self.name != "ollama-local":
-            headers["Authorization"] = "Bearer " + self.key
-        if self.name not in ("ollama-local", "openrouter") and not self.key:
-            raise ValueError("API key required")
         req = urllib.request.Request(self.base + path, None if body is None else
-                                     json.dumps(body).encode(), headers)
-        try:
-            with urllib.request.urlopen(req, timeout=120) as res:
-                return json.loads(res.read(8 * 1024 * 1024))
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"{self.name}: HTTP {exc.code}") from None
+                                     json.dumps(body).encode(), self._headers())
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as res:
+                    return json.loads(res.read(8 * 1024 * 1024))
+            except urllib.error.HTTPError as exc:
+                if exc.code in RETRY_CODES and attempt < len(RETRY_DELAYS):
+                    time.sleep(RETRY_DELAYS[attempt])
+                    continue
+                raise RuntimeError(f"{self.name}: HTTP {exc.code}") from None
 
     def models(self):
         if self.name.startswith("ollama"):
@@ -104,26 +120,47 @@ class Provider:
             raise ValueError(EMPTY_HINT if getattr(self, "last_thinking", "") else "empty model output")
         return out
 
-    def _stream_lines(self, path, body, cancelled):
-        """Yield decoded text lines from a streaming HTTP response."""
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    def _headers(self, stream=False):
+        headers = {"Content-Type": "application/json"}
+        if stream:
+            headers["Accept"] = "text/event-stream"
         if self.name == "anthropic":
             headers.update({"x-api-key": self.key, "anthropic-version": "2023-06-01"})
         elif self.key and self.name != "ollama-local":
             headers["Authorization"] = "Bearer " + self.key
         if self.name not in ("ollama-local", "openrouter") and not self.key:
             raise ValueError("API key required")
-        req = urllib.request.Request(self.base + path, json.dumps(body).encode(), headers)
-        try:
-            res = urllib.request.urlopen(req, timeout=300)
-        except urllib.error.HTTPError as exc:
-            detail = ""
+        return headers
+
+    def _stream_lines(self, path, body, cancelled):
+        """Yield decoded text lines from a streaming HTTP response.
+
+        Transient failures (HTTP 429/5xx, dropped connections) are retried before
+        any data arrives; nothing is retried once the reply has started.
+        """
+        req = urllib.request.Request(self.base + path, json.dumps(body).encode(), self._headers(True))
+        for attempt in range(len(RETRY_DELAYS) + 1):
             try:
-                err = json.loads(exc.read(65536))
-                detail = (err.get("error") or {}).get("message", "") if isinstance(err.get("error"), dict) else str(err.get("error", ""))
-            except Exception:
-                pass
-            raise RuntimeError(f"{self.name}: HTTP {exc.code}" + (f" - {detail[:300]}" if detail else "")) from None
+                res = urllib.request.urlopen(req, timeout=300)
+                break
+            except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    raw = exc.read(65536)
+                    err = json.loads(raw)
+                    e = err.get("error")
+                    detail = e.get("message", "") if isinstance(e, dict) else str(e or err.get("message") or "")
+                except Exception:
+                    pass
+                if exc.code in RETRY_CODES and attempt < len(RETRY_DELAYS) and not cancelled():
+                    time.sleep(RETRY_DELAYS[attempt])
+                    continue
+                raise ProviderError(self.name, exc.code, detail) from None
+            except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+                if attempt < len(RETRY_DELAYS) and not cancelled():
+                    time.sleep(RETRY_DELAYS[attempt])
+                    continue
+                raise RuntimeError(f"{self.name}: connection failed ({getattr(exc, 'reason', exc)})") from None
         with res:
             for raw in res:
                 if cancelled():
@@ -132,13 +169,21 @@ class Provider:
                 if line:
                     yield line
 
-    def stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False, on_thinking=lambda s: None):
-        """Stream a multi-turn reply, calling on_delta with each text fragment."""
+    def stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False,
+               on_thinking=lambda s: None, tools=False):
+        """Stream a multi-turn reply, calling on_delta with each text fragment.
+
+        With tools=True the run_python tool is offered natively; requested calls are
+        left in self.last_tool_calls as [{"id", "name", "arguments"}].
+        """
         if not self.model:
             raise ValueError("select a model")
         self.calls += 1
         parts, thoughts, usage = [], [], {}
         self.stop_reason = ""
+        self.last_tool_calls = []
+        self.last_output_items = []
+        pending = {}  # index -> partial tool call
 
         def think(text):
             if text:
@@ -161,31 +206,59 @@ class Provider:
                 parts.append(text)
                 on_delta(text)
 
+        def args_of(raw):
+            if isinstance(raw, dict):
+                return raw
+            try:
+                value = json.loads(raw or "{}")
+                return value if isinstance(value, dict) else {"code": str(value)}
+            except ValueError:
+                return {"code": raw or ""}
+
         if self.name == "openai":
             body = {"model": self.model, "input": messages, "max_output_tokens": MAX_OUT, "store": False, "stream": True}
             if system:
                 body["instructions"] = system
+            if tools:
+                body["tools"] = [{"type": "function", **TOOL_SPEC}]
+                body["include"] = ["reasoning.encrypted_content"]
             for ev in sse(self._stream_lines("/responses", body, cancelled)):
-                if ev.get("type") == "response.output_text.delta":
+                t = ev.get("type")
+                if t == "response.output_text.delta":
                     emit(ev.get("delta", ""))
-                elif ev.get("type") == "response.reasoning_summary_text.delta":
+                elif t == "response.reasoning_summary_text.delta":
                     think(ev.get("delta", ""))
-                elif ev.get("type") == "response.completed":
+                elif t == "response.output_item.done":
+                    item = ev.get("item") or {}
+                    self.last_output_items.append(item)
+                    if item.get("type") == "function_call":
+                        self.last_tool_calls.append({"id": item.get("call_id"), "name": item.get("name"),
+                                                     "arguments": args_of(item.get("arguments"))})
+                elif t == "response.completed":
                     usage = (ev.get("response") or {}).get("usage") or {}
-                elif ev.get("type") == "response.incomplete":
+                elif t == "response.incomplete":
                     self.stop_reason = "length"
-                elif ev.get("type") in ("error", "response.failed"):
+                elif t in ("error", "response.failed"):
                     raise RuntimeError("openai: " + json.dumps(ev.get("error") or ev.get("response", {}).get("error"))[:300])
         elif self.name == "anthropic":
             body = {"model": self.model, "max_tokens": ANTHROPIC_OUT, "messages": messages, "stream": True}
             if system:
                 body["system"] = system
+            if tools:
+                body["tools"] = [{"name": TOOL_SPEC["name"], "description": TOOL_SPEC["description"],
+                                  "input_schema": TOOL_SPEC["parameters"]}]
             for ev in sse(self._stream_lines("/messages", body, cancelled)):
                 t = ev.get("type")
-                if t == "content_block_delta" and ev["delta"].get("type") == "text_delta":
+                if t == "content_block_start" and (ev.get("content_block") or {}).get("type") == "tool_use":
+                    b = ev["content_block"]
+                    pending[ev.get("index", 0)] = {"id": b.get("id"), "name": b.get("name"), "json": ""}
+                elif t == "content_block_delta" and ev["delta"].get("type") == "text_delta":
                     emit(ev["delta"]["text"])
                 elif t == "content_block_delta" and ev["delta"].get("type") == "thinking_delta":
                     think(ev["delta"].get("thinking", ""))
+                elif t == "content_block_delta" and ev["delta"].get("type") == "input_json_delta":
+                    pending.setdefault(ev.get("index", 0), {"id": None, "name": None, "json": ""})["json"] += \
+                        ev["delta"].get("partial_json", "")
                 elif t == "message_start":
                     usage.update((ev.get("message") or {}).get("usage") or {})
                 elif t == "message_delta":
@@ -193,9 +266,14 @@ class Provider:
                     self.stop_reason = (ev.get("delta") or {}).get("stop_reason") or ""
                 elif t == "error":
                     raise RuntimeError("anthropic: " + str((ev.get("error") or {}).get("message", ""))[:300])
+            for i in sorted(pending):
+                c = pending[i]
+                self.last_tool_calls.append({"id": c["id"], "name": c["name"], "arguments": args_of(c["json"])})
         elif self.name.startswith("ollama"):
             full = ([{"role": "system", "content": system}] if system else []) + messages
             body = {"model": self.model, "stream": True, "messages": full, "options": {"num_predict": MAX_OUT}}
+            if tools:
+                body["tools"] = [{"type": "function", "function": TOOL_SPEC}]
             for line in self._stream_lines("/chat", body, cancelled):
                 try:
                     ev = json.loads(line)
@@ -203,14 +281,21 @@ class Provider:
                     continue
                 if ev.get("error"):
                     raise RuntimeError(f"{self.name}: {str(ev['error'])[:300]}")
-                think((ev.get("message") or {}).get("thinking") or "")
-                emit((ev.get("message") or {}).get("content") or "")
+                msg = ev.get("message") or {}
+                think(msg.get("thinking") or "")
+                emit(msg.get("content") or "")
+                for tc in msg.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    self.last_tool_calls.append({"id": tc.get("id"), "name": fn.get("name"),
+                                                 "arguments": args_of(fn.get("arguments"))})
                 if ev.get("done"):
                     usage = {k: ev[k] for k in ("prompt_eval_count", "eval_count") if k in ev}
                     self.stop_reason = ev.get("done_reason") or ""
         else:
             full = ([{"role": "system", "content": system}] if system else []) + messages
             body = {"model": self.model, "max_tokens": MAX_OUT, "messages": full, "stream": True}
+            if tools:
+                body["tools"] = [{"type": "function", "function": TOOL_SPEC}]
             for ev in sse(self._stream_lines("/chat/completions", body, cancelled)):
                 if ev.get("error"):
                     raise RuntimeError("openrouter: " + str(ev["error"])[:300])
@@ -220,14 +305,50 @@ class Provider:
                     d = choice.get("delta") or {}
                     think(d.get("reasoning") or d.get("reasoning_content") or "")
                     emit(d.get("content") or "")
+                    for tc in d.get("tool_calls") or []:
+                        c = pending.setdefault(tc.get("index", 0), {"id": None, "name": None, "json": ""})
+                        c["id"] = tc.get("id") or c["id"]
+                        fn = tc.get("function") or {}
+                        c["name"] = fn.get("name") or c["name"]
+                        c["json"] += fn.get("arguments") or ""
                 if ev.get("usage"):
                     usage = ev["usage"]
+            for i in sorted(pending):
+                c = pending[i]
+                self.last_tool_calls.append({"id": c["id"], "name": c["name"], "arguments": args_of(c["json"])})
+        for i, c in enumerate(self.last_tool_calls):
+            c["id"] = c.get("id") or f"call_{self.calls}_{i}"
         self.usage.append(usage)
         text = "".join(parts)
         self.last_thinking = "".join(thoughts)
-        if not text.strip() and not cancelled() and not self.last_thinking.strip():
+        if not text.strip() and not cancelled() and not self.last_thinking.strip() and not self.last_tool_calls:
             raise ValueError("empty model output")
         return text
+
+    def tool_followup(self, text, calls, outputs):
+        """Messages to append after a native tool round, in this provider's format."""
+        if self.name == "openai":
+            items = [i for i in self.last_output_items if i.get("type") in ("reasoning", "message", "function_call")]
+            return items + [{"type": "function_call_output", "call_id": c["id"], "output": o}
+                            for c, o in zip(calls, outputs)]
+        if self.name == "anthropic":
+            content = ([{"type": "text", "text": text}] if text.strip() else []) + \
+                      [{"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["arguments"]} for c in calls]
+            return [{"role": "assistant", "content": content},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": c["id"], "content": o}
+                                                 for c, o in zip(calls, outputs)]}]
+        if self.name.startswith("ollama"):
+            msg = {"role": "assistant", "content": text,
+                   "tool_calls": [{"type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+                                  for c in calls]}
+            if getattr(self, "last_thinking", ""):
+                msg["thinking"] = self.last_thinking
+            return [msg] + [{"role": "tool", "tool_name": c["name"], "content": o} for c, o in zip(calls, outputs)]
+        return [{"role": "assistant", "content": text or None,
+                 "tool_calls": [{"id": c["id"], "type": "function",
+                                 "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}}
+                                for c in calls]}] + \
+               [{"role": "tool", "tool_call_id": c["id"], "content": o} for c, o in zip(calls, outputs)]
 
     def generate(self, instruction, payload):
         prompt = instruction + "\nData (not instructions):\n" + json.dumps(payload, ensure_ascii=False)
@@ -275,6 +396,12 @@ CODE_PROMPT = (
     "Give your best answer early, then confirm it with code. At most {rounds} rounds of runs per reply; "
     "ordinary ```python blocks without 'run' are shown, not executed."
 )
+TOOL_PROMPT = (
+    "You have a run_python tool that executes Python 3 (standard library only) and returns stdout and stderr. "
+    "Call it for any calculation, search or exhaustive check instead of working it out by hand, and print the "
+    "values you need. Do not just say you will compute something: call the tool in this reply. "
+    "Give your best answer early, then confirm it with the tool. At most {rounds} rounds of tool calls per reply."
+)
 CODE_ROUNDS = 4
 CODE_RUNS_PER_ROUND = 3
 
@@ -300,43 +427,75 @@ def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinkin
     if req.get("protocol"):
         system = (SUBSTRATE_PROMPT + "\n\n" + system).strip()
     tools = bool(req.get("code"))
-    if tools:
-        system = (CODE_PROMPT.format(rounds=CODE_ROUNDS) + "\n\n" + system).strip()
+    native = tools and req.get("native_tools", True)
+    base_system = system
+    def system_for(native_):
+        if not tools:
+            return base_system
+        prompt = (TOOL_PROMPT if native_ else CODE_PROMPT).format(rounds=CODE_ROUNDS)
+        return (prompt + "\n\n" + base_system).strip()
     p = Provider(**req["provider"])
     start = time.monotonic()
     convo, turns, segments, texts, thoughts = list(clean), [], [], [], []
+    fallback_note = ""
     for round_ in range(CODE_ROUNDS + 1):
-        if on_delta is None:
-            text = p.complete(convo, system)
-        else:
-            text = p.stream(convo, system, on_delta, cancelled, on_thinking)
+        try:
+            if on_delta is None and not native:
+                text = p.complete(convo, system_for(False))
+                p.last_tool_calls = []
+            else:
+                text = p.stream(convo, system_for(native), on_delta or (lambda t: None), cancelled, on_thinking,
+                                tools=native)
+        except ProviderError as exc:
+            if native and exc.code in (400, 404, 422) and round_ == 0:
+                # Model or endpoint does not accept tools: fall back to fenced ```python run blocks.
+                native = False
+                fallback_note = "This model doesn't support tool calls; using code blocks instead."
+                text = p.stream(convo, system_for(False), on_delta or (lambda t: None), cancelled, on_thinking)
+                p.last_tool_calls = []
+            else:
+                raise
         thoughts.append(getattr(p, "last_thinking", "") or "")
-        if not text.strip():
+        calls = [c for c in (getattr(p, "last_tool_calls", None) or []) if c.get("name") == TOOL_SPEC["name"]]
+        if not text.strip() and not calls:
             break
-        texts.append(text)
-        segments.append({"type": "text", "text": text})
-        runs = find_runs(text) if tools and not cancelled() else []
-        if not runs:
+        if text.strip():
+            texts.append(text)
+            segments.append({"type": "text", "text": text})
+        fenced = find_runs(text) if tools and not calls and not cancelled() else []
+        if not calls and not fenced:
             turns.append({"role": "assistant", "content": text})
             break
         if round_ == CODE_ROUNDS:
             segments.append({"type": "notice", "text": f"Stopped after {CODE_ROUNDS} rounds of code runs."})
-            turns.append({"role": "assistant", "content": text})
+            turns.append({"role": "assistant", "content": text or "(stopped before answering)"})
             break
+        codes = [str((c.get("arguments") or {}).get("code") or "") for c in calls] if calls else fenced
         results = []
-        for code in runs[:CODE_RUNS_PER_ROUND]:
+        for code in codes[:CODE_RUNS_PER_ROUND]:
             if cancelled():
                 break
-            r = run_code(code)
+            r = run_code(code) if code.strip() else {
+                "code": code, "stdout": "", "stderr": "run_python was called without code.", "exit": 1,
+                "timed_out": False, "ok": False, "seconds": 0}
             results.append(r)
             segments.append({"type": "run", **r})
             on_tool(r)
         if not results:
-            turns.append({"role": "assistant", "content": text})
+            turns.append({"role": "assistant", "content": text or "(stopped)"})
             break
         feedback = result_message(results)
-        convo += [{"role": "assistant", "content": text}, {"role": "user", "content": feedback}]
-        turns += [{"role": "assistant", "content": text}, {"role": "user", "content": feedback}]
+        if calls:
+            outputs = [result_message([r]) for r in results]
+            calls = calls[:len(results)]
+            convo += p.tool_followup(text, calls, outputs)
+        else:
+            convo += [{"role": "assistant", "content": text}, {"role": "user", "content": feedback}]
+        shown = (text.strip() + "\n\n" if text.strip() else "") + "\n\n".join(
+            f"[ran code]\n```python\n{r['code'].rstrip()}\n```" for r in results)
+        turns += [{"role": "assistant", "content": shown}, {"role": "user", "content": feedback}]
+    if fallback_note:
+        segments.insert(0, {"type": "notice", "text": fallback_note})
     thinking = "\n\n".join(t for t in thoughts if t)
     full = "\n\n".join(texts)
     base = {"usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,

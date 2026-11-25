@@ -63,9 +63,10 @@ class LoopTests(unittest.TestCase):
         seen, tools = [], []
 
         def fake_stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False,
-                        on_thinking=lambda s: None):
+                        on_thinking=lambda s: None, tools=False):
             seen.append(messages)
             self.last_thinking = ""
+            self.last_tool_calls = []
             text = next(replies)
             on_delta(text)
             return text
@@ -83,14 +84,110 @@ class LoopTests(unittest.TestCase):
 
     def test_code_off_never_runs(self):
         def fake_stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False,
-                        on_thinking=lambda s: None):
+                        on_thinking=lambda s: None, tools=False):
             self.last_thinking = ""
+            self.last_tool_calls = []
             return "```python run\nprint('should not run')\n```"
         with patch.object(Provider, "stream", fake_stream), patch("desktop_bridge.run_code") as rc:
             r = chat({"provider": {"name": "ollama-local", "model": "m"},
                       "messages": [{"role": "user", "content": "q"}]}, None, on_delta=lambda t: None)
         rc.assert_not_called()
         self.assertEqual(r["runs"], 0)
+
+
+import io
+import urllib.error
+from desktop_bridge import ProviderError
+
+CODE_JSON = json.dumps({"code": "print(6 * 7)"})
+
+
+def sse(*events):
+    return ["data: " + json.dumps(e) for e in events] + ["data: [DONE]"]
+
+
+def native_streams():
+    """First reply asks for the tool, second reply answers; per provider wire format."""
+    return {
+        "ollama-cloud": [
+            [json.dumps({"message": {"content": "", "thinking": "compute it"}}),
+             json.dumps({"message": {"content": "", "tool_calls": [{"function": {"name": "run_python",
+                         "arguments": {"code": "print(6 * 7)"}}}]}}),
+             json.dumps({"message": {"content": ""}, "done": True})],
+            [json.dumps({"message": {"content": "The answer is 42."}, "done": True})]],
+        "openrouter": [
+            sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "run_python",
+                 "arguments": CODE_JSON[:10]}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": CODE_JSON[10:]}}]},
+                              "finish_reason": "tool_calls"}]}),
+            sse({"choices": [{"delta": {"content": "The answer is 42."}}]})],
+        "anthropic": [
+            sse({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Checking."}},
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tu1",
+                 "name": "run_python", "input": {}}},
+                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta",
+                 "partial_json": CODE_JSON}},
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+            sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "The answer is 42."}})],
+        "openai": [
+            sse({"type": "response.output_item.done", "item": {"type": "function_call", "call_id": "fc1",
+                 "name": "run_python", "arguments": CODE_JSON}}),
+            sse({"type": "response.output_text.delta", "delta": "The answer is 42."})],
+    }
+
+
+class NativeToolTests(unittest.TestCase):
+    def test_every_provider_round_trips_a_tool_call(self):
+        for name, rounds in native_streams().items():
+            with self.subTest(name=name):
+                it, bodies = iter(rounds), []
+
+                def fake_lines(self, path, body, cancelled):
+                    bodies.append(json.loads(json.dumps(body)))
+                    return iter(next(it))
+
+                with patch.object(Provider, "_stream_lines", fake_lines):
+                    r = chat({"provider": {"name": name, "key": "k", "model": "m"}, "code": True,
+                              "messages": [{"role": "user", "content": "6*7?"}]}, None, on_delta=lambda t: None)
+                self.assertEqual(r["runs"], 1)
+                self.assertEqual([s["stdout"].strip() for s in r["segments"] if s["type"] == "run"], ["42"])
+                self.assertIn("tools", bodies[0])
+                second = json.dumps(bodies[1])
+                self.assertIn("42", second)                     # tool output sent back natively
+                self.assertTrue(r["text"].endswith("The answer is 42."))
+                self.assertEqual(r["turns"][-1]["content"], "The answer is 42.")
+
+    def test_falls_back_to_code_blocks_when_tools_rejected(self):
+        calls = []
+
+        def fake_lines(self, path, body, cancelled):
+            calls.append(body)
+            if "tools" in body:
+                raise ProviderError(self.name, 400, "model does not support tools")
+            if len(calls) == 2:
+                return iter([json.dumps({"message": {"content": "```python run\nprint(6*7)\n```"}, "done": True})])
+            return iter([json.dumps({"message": {"content": "42."}, "done": True})])
+
+        with patch.object(Provider, "_stream_lines", fake_lines):
+            r = chat({"provider": {"name": "ollama-local", "model": "m"}, "code": True,
+                      "messages": [{"role": "user", "content": "q"}]}, None, on_delta=lambda t: None)
+        self.assertEqual(r["runs"], 1)
+        self.assertEqual(r["segments"][0]["type"], "notice")
+        self.assertIn("python run", calls[1]["messages"][0]["content"])   # fenced prompt after fallback
+
+    def test_retries_server_errors_then_succeeds(self):
+        attempts = []
+
+        def flaky(req, timeout=0):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, io.BytesIO(b"{}"))
+            return io.BytesIO((json.dumps({"message": {"content": "ok"}, "done": True}) + "\n").encode())
+
+        with patch("desktop_bridge.urllib.request.urlopen", flaky), patch("desktop_bridge.time.sleep"):
+            text = Provider("ollama-local", model="m").stream([{"role": "user", "content": "q"}])
+        self.assertEqual((text, len(attempts)), ("ok", 3))
 
 
 if __name__ == "__main__":

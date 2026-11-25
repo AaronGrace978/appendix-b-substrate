@@ -156,6 +156,10 @@ jobs:
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Models can run code
 
+          **New in 0.7.1: code running that models actually use**
+          - Code now runs through each provider's built-in **tool calling** (Ollama, OpenRouter, Anthropic, OpenAI). Models like Kimi were trained to call tools this way and ignored the old text convention: they said "I'll compute it" and stopped. Models that don't support tools fall back automatically to code blocks.
+          - **Automatic retries** on provider server errors (HTTP 500/502/503/504, 429 rate limits, dropped connections), with short backoff, before any text has streamed. Ollama Cloud's intermittent "Internal Server Error" no longer kills the reply.
+
           **New in 0.7: models can run code**
           - Turn on **Code** in the chat box and the model can write a Python block, have the app run it, read the output, and keep going: guess first, then verify with code instead of grinding through arithmetic by hand.
           - Each run shows as a card in the reply: the code (collapsible), its output, and whether it succeeded.
