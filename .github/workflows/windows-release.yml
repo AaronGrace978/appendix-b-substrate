@@ -35,7 +35,12 @@ jobs:
         run: |
           npm install --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Electron 42+ downloads its executable on demand, not during npm install.
+          & .\node_modules\.bin\install-electron.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath 'node_modules/electron/dist/electron.exe')) { throw 'Electron Windows binary was not downloaded' }
           npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Assemble portable Windows application
         shell: pwsh
         run: |
