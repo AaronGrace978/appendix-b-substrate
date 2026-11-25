@@ -125,6 +125,13 @@ by `chat_checks.py` and shown as ✓ / ✗ under the message. Each checked claim
 model's persistent substrate state, so chat drives the same dynamics as experiments.
 Unrecognised claims are simply not checked; no check is not support.
 
+v0.7 lets models **run code**. With **Code** on, a model can write a fenced
+` ```python run ` block; `code_runner.py` executes it in a fresh `python -I` child
+process with a 15-second limit, network and process spawning blocked, and file
+access confined to a throwaway temp folder, then feeds stdout/stderr back so the
+model can continue (up to 4 rounds). This is the VERIFY step with a real tool:
+the model proposes, code decides. It is a guard-rail, not a security sandbox.
+
 See [desktop setup and Windows release instructions](desktop/README.md).
 The experimental desktop lab supports OpenAI, Anthropic, OpenRouter, Ollama
 Cloud and Ollama Local. The Windows release pipeline packages a portable

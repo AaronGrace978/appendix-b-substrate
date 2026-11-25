@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from behavioral import SearchRuntime
 from chat_checks import extract_checks
+from code_runner import find_runs, result_message, run_code
 from runtime_v2 import Evidence, Verdict, claim_id
 
 PROVIDERS = {
@@ -266,10 +267,23 @@ SUBSTRATE_PROMPT = (
 )
 
 
-def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None):
+CODE_PROMPT = (
+    "You can run Python 3 code (standard library only). To run code, write a fenced block whose first line is "
+    "```python run and then stop writing. The app runs it and replies with its stdout and stderr, then you continue. "
+    "Use code for any calculation, search or exhaustive check instead of working it out by hand, and print the "
+    "values you need. Each run has a 15 second limit, no network and no access to the user's files. "
+    "Give your best answer early, then confirm it with code. At most {rounds} rounds of runs per reply; "
+    "ordinary ```python blocks without 'run' are shown, not executed."
+)
+CODE_ROUNDS = 4
+CODE_RUNS_PER_ROUND = 3
+
+
+def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None,
+         on_tool=lambda r: None):
     messages = req.get("messages")
-    if type(messages) is not list or not 1 <= len(messages) <= 200:
-        raise ValueError("messages must be a list of 1-200 turns")
+    if type(messages) is not list or not 1 <= len(messages) <= 400:
+        raise ValueError("messages must be a list of 1-400 turns")
     clean = []
     for m in messages:
         if not isinstance(m, dict) or m.get("role") not in ("user", "assistant") \
@@ -285,24 +299,61 @@ def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinkin
         raise ValueError("system prompt must be text under 20000 characters")
     if req.get("protocol"):
         system = (SUBSTRATE_PROMPT + "\n\n" + system).strip()
+    tools = bool(req.get("code"))
+    if tools:
+        system = (CODE_PROMPT.format(rounds=CODE_ROUNDS) + "\n\n" + system).strip()
     p = Provider(**req["provider"])
     start = time.monotonic()
-    if on_delta is None:
-        text = p.complete(clean, system)
-    else:
-        text = p.stream(clean, system, on_delta, cancelled, on_thinking)
-    thinking = getattr(p, "last_thinking", "")
-    if not text.strip() and not cancelled():
+    convo, turns, segments, texts, thoughts = list(clean), [], [], [], []
+    for round_ in range(CODE_ROUNDS + 1):
+        if on_delta is None:
+            text = p.complete(convo, system)
+        else:
+            text = p.stream(convo, system, on_delta, cancelled, on_thinking)
+        thoughts.append(getattr(p, "last_thinking", "") or "")
+        if not text.strip():
+            break
+        texts.append(text)
+        segments.append({"type": "text", "text": text})
+        runs = find_runs(text) if tools and not cancelled() else []
+        if not runs:
+            turns.append({"role": "assistant", "content": text})
+            break
+        if round_ == CODE_ROUNDS:
+            segments.append({"type": "notice", "text": f"Stopped after {CODE_ROUNDS} rounds of code runs."})
+            turns.append({"role": "assistant", "content": text})
+            break
+        results = []
+        for code in runs[:CODE_RUNS_PER_ROUND]:
+            if cancelled():
+                break
+            r = run_code(code)
+            results.append(r)
+            segments.append({"type": "run", **r})
+            on_tool(r)
+        if not results:
+            turns.append({"role": "assistant", "content": text})
+            break
+        feedback = result_message(results)
+        convo += [{"role": "assistant", "content": text}, {"role": "user", "content": feedback}]
+        turns += [{"role": "assistant", "content": text}, {"role": "user", "content": feedback}]
+    thinking = "\n\n".join(t for t in thoughts if t)
+    full = "\n\n".join(texts)
+    base = {"usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,
+            "provider": p.name, "model": p.model, "thinking": thinking, "segments": segments,
+            "runs": sum(1 for s in segments if s["type"] == "run")}
+    if not full.strip() and not cancelled():
         # Reasoning arrived but no answer: report it rather than failing silently.
-        return {"text": "", "thinking": thinking, "notice": EMPTY_HINT, "usage": p.usage[-1] if p.usage else {},
-                "seconds": time.monotonic() - start, "provider": p.name, "model": p.model,
-                "checks": [], "state": None, "cancelled": False}
-    checks = extract_checks(text) if req.get("verify", True) else []
+        return {**base, "text": "", "notice": EMPTY_HINT, "checks": [], "state": None, "cancelled": False, "turns": []}
+    if turns and turns[-1]["role"] == "user":
+        # Answer never arrived after the last run (e.g. reasoning only): keep the history valid.
+        turns.append({"role": "assistant", "content": "(no answer after the code results)"})
+        segments.append({"type": "notice", "text": "The model returned no answer after the code results."})
+    checks = extract_checks(full) if req.get("verify", True) else []
     state = None
     if directory is not None and checks:
         state = observe_checks(directory, p, checks)
-    return {"text": text, "usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,
-            "provider": p.name, "model": p.model, "checks": checks, "state": state, "thinking": thinking,
+    return {**base, "text": full, "turns": turns, "checks": checks, "state": state,
             "truncated": getattr(p, "stop_reason", "") in ("length", "max_tokens", "max_output_tokens"),
             "cancelled": bool(cancelled())}
 
@@ -382,14 +433,15 @@ def run(req, directory):
         rt.close()
 
 
-def handle(req, directory, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None):
+def handle(req, directory, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None,
+           on_tool=lambda r: None):
     action = req.get("action")
     if action == "models":
         return Provider(**req["provider"]).models()
     if action == "run":
         return run(req, directory)
     if action == "chat":
-        return chat(req, directory, on_delta, cancelled, on_thinking)
+        return chat(req, directory, on_delta, cancelled, on_thinking, on_tool)
     if action == "state":
         return chat_state(req, directory)
     raise ValueError("unknown action")
@@ -411,7 +463,8 @@ def serve(directory, stdin=sys.stdin, stdout=sys.stdout):
         try:
             on_delta = (lambda t: send({"id": rid, "delta": t})) if req.get("stream") else None
             on_thinking = (lambda t: send({"id": rid, "thinking": t})) if req.get("stream") else (lambda t: None)
-            value = handle(req, directory, on_delta, flag.is_set, on_thinking)
+            on_tool = (lambda r: send({"id": rid, "tool": r})) if req.get("stream") else (lambda r: None)
+            value = handle(req, directory, on_delta, flag.is_set, on_thinking, on_tool)
             send({"id": rid, "ok": True, "value": value})
         except Exception as exc:
             send({"id": rid, "ok": False, "error": f"{type(exc).__name__}: {exc}"})

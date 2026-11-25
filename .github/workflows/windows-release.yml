@@ -3,7 +3,7 @@ name: Windows release
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/windows-release.yml', 'desktop/**', 'desktop_bridge.py', 'behavioral.py', 'runtime_v2.py', 'chat_checks.py']
+    paths: ['.github/workflows/windows-release.yml', 'desktop/**', 'desktop_bridge.py', 'behavioral.py', 'runtime_v2.py', 'chat_checks.py', 'code_runner.py']
     tags: ['v*']
   workflow_dispatch:
 
@@ -68,7 +68,7 @@ jobs:
           foreach ($file in @('main.cjs','preload.cjs','index.html','renderer.js','README.md','icon.png','icon.ico')) {
             Copy-Item -LiteralPath "desktop/$file" -Destination $desktop
           }
-          foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','chat_checks.py','README.md')) {
+          foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','chat_checks.py','code_runner.py','README.md')) {
             Copy-Item -LiteralPath $file -Destination $appDir
           }
           @{name='appendix-b-desktop-lab'; productName='Appendix B'; version=$env:APP_VERSION; main='desktop/main.cjs'} | ConvertTo-Json | Set-Content (Join-Path $appDir 'package.json') -Encoding utf8
@@ -154,7 +154,13 @@ jobs:
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Host 'Release already exists; keeping existing assets.'; exit 0 }
           $notes = @"
-          ## Appendix B v$($env:APP_VERSION) — Streaming chat with independent checks
+          ## Appendix B v$($env:APP_VERSION) — Models can run code
+
+          **New in 0.7: models can run code**
+          - Turn on **Code** in the chat box and the model can write a Python block, have the app run it, read the output, and keep going: guess first, then verify with code instead of grinding through arithmetic by hand.
+          - Each run shows as a card in the reply: the code (collapsible), its output, and whether it succeeded.
+          - Runs are restricted: 15-second limit, no network, no process spawning, and file reads and writes only inside a throwaway temp folder, so code can't read your files and send them to a cloud model. This is a guard-rail, not a security sandbox; use models you trust.
+          - Up to 4 rounds of runs per reply. Collatz step-count claims are now checked independently too.
 
           **New in 0.6.2: reasoning models fixed**
           - **No more "empty model output"** with reasoning models such as DeepSeek v4 Pro, Kimi and gpt-oss on Ollama Cloud. Their reasoning now streams live in a collapsible **Reasoning** panel, followed by the answer.

@@ -100,6 +100,8 @@ for (const tab of document.querySelectorAll('nav button')) tab.onclick = () => {
 /* ── chat ─────────────────────────────── */
 let history = [];
 $('protocol').checked = store.get('protocol') === '1';
+$('codeTool').checked = store.get('code') !== '0';
+$('codeTool').onchange = () => store.set('code', $('codeTool').checked ? '1' : '0');
 $('protocol').onchange = () => store.set('protocol', $('protocol').checked ? '1' : '0');
 
 function el(tag, cls, text, parent) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (parent) parent.append(e); return e; }
@@ -209,6 +211,25 @@ function renderChecks(checks, col) {
   }
 }
 
+const RUN_RE = /```[ \t]*(?:python|py)[ \t]+run[ \t]*\n[\s\S]*?(?:```|$)/gi;
+const proseOf = text => String(text || '').replace(RUN_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+
+function runCard(r, pending = false) {
+  const card = document.createElement('div');
+  card.className = 'run ' + (pending ? 'pending' : r.ok ? 'ok' : 'fail');
+  const h = el('div', 'run-h', null, card);
+  el('span', 'tag', 'PYTHON', h);
+  el('span', '', pending ? 'running…' : 'ran in ' + r.seconds + 's', h);
+  el('span', 'st', pending ? '●' : r.timed_out ? 'timed out' : r.ok ? '✓ exit 0' : '✗ exit ' + r.exit, h);
+  const d = el('details', '', null, card); el('summary', '', 'code', d);
+  el('pre', '', (r.code || '').replace(/\n$/, ''), d);
+  if (!pending) {
+    el('pre', 'out', r.stdout || '(no output)', card);
+    if (r.stderr && r.stderr.trim()) el('pre', 'err', r.stderr.trim(), card);
+  }
+  return card;
+}
+
 async function send() {
   if (chatId) { cancelled = true; window.lab.cancel(chatId); return; }
   const text = $('prompt').value.trim();
@@ -220,21 +241,23 @@ async function send() {
   addMessage('user', text);
   $('prompt').value = ''; grow();
   const row = addMessage('assistant', '');
-  const body = row.querySelector('.body');
-  body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
-  body.classList.add('streaming');
+  const col = row.querySelector('.body').parentElement;
+  let body = row.querySelector('.body');
+  const typing = () => { body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>'; body.classList.add('streaming'); };
+  typing();
   cancelled = false;
   const id = await window.lab.newId(); chatId = id; setChatBusy(true);
+  const useCode = $('codeTool').checked;
   status('Streaming · ' + p.model, 'busy');
   if ($('protocol').checked) scanPipeline(true);
-  let streamed = '', first = true;
+  let streamed = '', seg = '', fresh = true, runs = 0;
   let thinkBox = null, thinkText = null, thought = '';
   const ensureThink = () => {
     if (thinkBox) return;
     thinkBox = document.createElement('details'); thinkBox.className = 'think'; thinkBox.open = true;
     const sum = el('summary', '', null, thinkBox); el('span', 'pulse', null, sum); el('span', 'lbl', 'Reasoning…', sum);
     thinkText = el('div', 'think-text', null, thinkBox);
-    body.before(thinkBox);
+    col.querySelector('.body').before(thinkBox);
   };
   const off = window.lab.onDelta(m => {
     if (m.id !== id) return;
@@ -242,20 +265,27 @@ async function send() {
     if (m.thinking) {
       ensureThink(); thought += m.thinking; thinkText.textContent = thought;
       thinkText.scrollTop = thinkText.scrollHeight;
-      if (first) body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+      thinkBox.open = true; thinkBox.classList.remove('done'); thinkBox.querySelector('.lbl').textContent = 'Reasoning…';
     }
     if (m.delta) {
-      if (first) { body.textContent = ''; first = false; if (thinkBox) { thinkBox.open = false; thinkBox.querySelector('.lbl').textContent = 'Reasoning'; thinkBox.classList.add('done'); } }
-      streamed += m.delta; body.textContent = streamed;
+      if (fresh) { body.textContent = ''; fresh = false; if (thinkBox) { thinkBox.open = false; thinkBox.querySelector('.lbl').textContent = 'Reasoning'; thinkBox.classList.add('done'); } }
+      seg += m.delta; streamed += m.delta; body.textContent = proseOf(seg) || seg;
+    }
+    if (m.tool) {
+      // Close the current text segment, show the run, open a new segment for the model's follow-up.
+      runs++;
+      body.classList.remove('streaming'); renderBody(proseOf(seg), body); if (!proseOf(seg)) body.remove();
+      col.append(runCard(m.tool));
+      body = el('div', 'body', null, col); typing(); seg = ''; fresh = true;
+      status('Ran code (' + runs + ') · ' + p.model + ' continuing…', 'busy');
     }
     if (stick) $('log').scrollTop = $('log').scrollHeight; else $('jump').hidden = false;
   });
   try {
-    const r = await window.lab.request({action:'chat', stream:true, provider:p, messages:history, protocol:$('protocol').checked}, id);
+    const r = await window.lab.request({action:'chat', stream:true, provider:p, messages:history, protocol:$('protocol').checked, code:useCode}, id);
     if (thinkBox) { thinkBox.classList.add('done'); thinkBox.querySelector('.lbl').textContent = 'Reasoning · ' + (r.thinking || thought).length.toLocaleString() + ' chars'; if (r.text) thinkBox.open = false; }
     const reply = r.text || streamed;
     if (!reply.trim() && (r.thinking || thought)) {
-      // Reasoning only: keep the reasoning visible, explain, and let the user retry.
       body.classList.remove('streaming'); body.replaceChildren();
       el('p', 'notice', 'No final answer: ' + (r.notice || 'the model only returned reasoning.'), body);
       history.pop(); $('prompt').value = text; grow();
@@ -264,26 +294,35 @@ async function send() {
       return;
     }
     if (!reply.trim()) throw Error(r.cancelled ? 'Stopped before any text arrived.' : 'Empty reply');
-    history.push({role:'assistant', content:reply});
+    for (const t of (r.turns && r.turns.length ? r.turns : [{role:'assistant', content:reply}])) history.push(t);
     const stick = nearBottom();
-    row.dataset.raw = reply; renderBody(reply, body);
+    row.dataset.raw = reply;
+    // Rebuild the reply from its segments: text, code runs, notices.
+    for (const old of col.querySelectorAll(':scope > .body, :scope > .run')) old.remove();
+    for (const s of (r.segments && r.segments.length ? r.segments : [{type:'text', text:reply}])) {
+      if (s.type === 'run') col.append(runCard(s));
+      else if (s.type === 'notice') el('p', 'notice', s.text, el('div', 'body', null, col));
+      else { const prose = proseOf(s.text); if (prose) renderBody(prose, el('div', 'body', null, col)); }
+    }
+    body = col.querySelector(':scope > .body') || el('div', 'body', null, col);
     const u = r.usage || {};
     const tokens = (u.output_tokens ?? u.completion_tokens ?? u.eval_count);
-    row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : '') + (r.truncated ? ' · cut off at output limit' : '');
-    renderChecks(r.checks, body.parentElement);
+    row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.runs ? ' · ' + r.runs + ' code run' + (r.runs > 1 ? 's' : '') : '') + (r.cancelled ? ' · stopped' : '') + (r.truncated ? ' · cut off at output limit' : '');
+    renderChecks(r.checks, col);
     if (stick) toBottom();
     if (r.state) gauges(r.state, r.model);
-    $('usage').textContent = Math.floor(history.length / 2) + ' turns' + (r.checks && r.checks.length ? ' · ' + r.checks.length + ' claims checked' : '');
+    $('usage').textContent = history.filter(t => t.role === 'user' && !t.content.startsWith('Results from running your code')).length + ' turns' + (r.checks && r.checks.length ? ' · ' + r.checks.length + ' claims checked' : '');
     status(labelOf(p.name) + ' · ' + p.model, 'ok');
     const phases = ['decompose','attack','verify','conclude'].filter(ph => new RegExp('\\b' + ph, 'i').test(reply));
     if ($('protocol').checked || phases.length >= 3) lightPipeline(phases);
   } catch (e) {
     history.pop(); row.remove();
     if (!streamed) { $('thread').lastChild?.remove(); $('prompt').value = text; grow(); }
-    else { history.push({role:'user', content:text}, {role:'assistant', content:streamed}); addMessage('assistant', streamed, 'partial'); }
+    else { history.push({role:'user', content:text}, {role:'assistant', content:streamed}); addMessage('assistant', proseOf(streamed) || streamed, 'partial'); }
     if (cancelled) status('Stopped.', ''); else { addMessage('error', clean(e.message)); status(clean(e.message), 'err'); }
   } finally { off(); chatId = null; setChatBusy(false); scanPipeline(false); $('prompt').focus(); }
 }
+
 $('send').onclick = send;
 $('prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 function grow(){ const t = $('prompt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 240) + 'px'; }

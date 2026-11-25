@@ -123,9 +123,42 @@ def letter_counts(text):
     return out
 
 
+def collatz_steps(n: int, limit: int = 100000) -> int | None:
+    steps = 0
+    while n != 1 and steps < limit:
+        n = n // 2 if n % 2 == 0 else 3 * n + 1
+        steps += 1
+    return steps if n == 1 else None
+
+
+def collatz(text):
+    """Check 'n takes k steps' claims when the text is about Collatz sequences."""
+    if "collatz" not in text.lower() and "3n+1" not in text.replace(" ", "").lower():
+        return []
+    out, seen = [], set()
+    pat = (r"\b(?:n\s*=\s*)?(\d{1,9})\b[^.\n]{0,40}?\b(?:takes|requires|needs|has|reaches 1 in|in)\s+"
+           r"(?:exactly\s+|only\s+)?(\d{1,5})\s+(?:total\s+)?steps")
+    for m in re.finditer(pat, text.replace(",", ""), re.I):
+        n, k = int(m.group(1)), int(m.group(2))
+        if n < 1 or (n, k) in seen:
+            continue
+        seen.add((n, k))
+        actual = collatz_steps(n)
+        if actual is None:
+            continue
+        out.append(_check("collatz", f"{n} takes {k} steps", actual == k, f"Python counts {actual} steps from {n} to 1"))
+    return out
+
+
+def strip_code(text: str) -> str:
+    """Remove fenced code blocks: code is evidence, not a claim."""
+    return re.sub(r"```.*?(?:```|$)", " ", text or "", flags=re.S)
+
+
 def extract_checks(text: str) -> list[dict]:
     """Return independently computed checks for recognisable claims in text."""
     if not isinstance(text, str):
         return []
-    checks = arithmetic(text) + primality(text) + letter_counts(text)
+    text = strip_code(text)
+    checks = arithmetic(text) + primality(text) + letter_counts(text) + collatz(text)
     return checks[:MAX_CHECKS]
