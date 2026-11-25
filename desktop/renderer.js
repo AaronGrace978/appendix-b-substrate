@@ -69,7 +69,7 @@ async function discover(review=false, quiet=false) {
   } finally { setLoading(false); btn.classList.remove('spin'); }
 }
 const labelOf = v => (PROVIDERS.find(p => p[0] === v) || [,v])[1];
-const clean = m => String(m).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+const clean = m => String(m).replace(/^Error invoking remote method '[^']+': (Error: )?/, '').replace(/^\w+Error: /, '');
 $('discover').onclick = () => discover(false);
 $('reviewDiscover').onclick = () => discover(true);
 $('provider').onchange = () => { store.set('provider', $('provider').value); $('key').value=''; discover(false, true); };
@@ -205,6 +205,7 @@ async function send() {
   if (!text) return;
   const p = config();
   if (!p.model) { status('Choose a model first — refresh the list or pick Custom model ID.', 'err'); $('modelSelect').focus(); return; }
+  for (const old of document.querySelectorAll('#thread .msg.error')) old.remove();
   history.push({role:'user', content:text});
   addMessage('user', text);
   $('prompt').value = ''; grow();
@@ -217,23 +218,48 @@ async function send() {
   status('Streaming · ' + p.model, 'busy');
   if ($('protocol').checked) scanPipeline(true);
   let streamed = '', first = true;
+  let thinkBox = null, thinkText = null, thought = '';
+  const ensureThink = () => {
+    if (thinkBox) return;
+    thinkBox = document.createElement('details'); thinkBox.className = 'think'; thinkBox.open = true;
+    const sum = el('summary', '', null, thinkBox); el('span', 'pulse', null, sum); el('span', 'lbl', 'Reasoning…', sum);
+    thinkText = el('div', 'think-text', null, thinkBox);
+    body.before(thinkBox);
+  };
   const off = window.lab.onDelta(m => {
     if (m.id !== id) return;
-    if (first) { body.textContent = ''; first = false; }
     const stick = nearBottom();
-    streamed += m.delta; body.textContent = streamed;
+    if (m.thinking) {
+      ensureThink(); thought += m.thinking; thinkText.textContent = thought;
+      thinkText.scrollTop = thinkText.scrollHeight;
+      if (first) body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+    }
+    if (m.delta) {
+      if (first) { body.textContent = ''; first = false; if (thinkBox) { thinkBox.open = false; thinkBox.querySelector('.lbl').textContent = 'Reasoning'; thinkBox.classList.add('done'); } }
+      streamed += m.delta; body.textContent = streamed;
+    }
     if (stick) $('log').scrollTop = $('log').scrollHeight; else $('jump').hidden = false;
   });
   try {
     const r = await window.lab.request({action:'chat', stream:true, provider:p, messages:history, protocol:$('protocol').checked}, id);
+    if (thinkBox) { thinkBox.classList.add('done'); thinkBox.querySelector('.lbl').textContent = 'Reasoning · ' + (r.thinking || thought).length.toLocaleString() + ' chars'; if (r.text) thinkBox.open = false; }
     const reply = r.text || streamed;
+    if (!reply.trim() && (r.thinking || thought)) {
+      // Reasoning only: keep the reasoning visible, explain, and let the user retry.
+      body.classList.remove('streaming'); body.replaceChildren();
+      el('p', 'notice', 'No final answer: ' + (r.notice || 'the model only returned reasoning.'), body);
+      history.pop(); $('prompt').value = text; grow();
+      row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's · reasoning only';
+      status('Reasoning only, no answer. Your prompt is back in the box to retry.', 'err');
+      return;
+    }
     if (!reply.trim()) throw Error(r.cancelled ? 'Stopped before any text arrived.' : 'Empty reply');
     history.push({role:'assistant', content:reply});
     const stick = nearBottom();
     row.dataset.raw = reply; renderBody(reply, body);
     const u = r.usage || {};
     const tokens = (u.output_tokens ?? u.completion_tokens ?? u.eval_count);
-    row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : '');
+    row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : '') + (r.truncated ? ' · cut off at output limit' : '');
     renderChecks(r.checks, body.parentElement);
     if (stick) toBottom();
     if (r.state) gauges(r.state, r.model);

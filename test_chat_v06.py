@@ -70,6 +70,35 @@ class StreamTests(unittest.TestCase):
             self.assertGreater(second["state"]["surprise"], first["state"]["surprise"])
 
 
+class ReasoningTests(unittest.TestCase):
+    def test_ollama_thinking_streams_separately(self):
+        lines = [json.dumps({"message": {"thinking": "Let me test n=40. "}}),
+                 json.dumps({"message": {"thinking": "40^2+40+41=1681."}}),
+                 json.dumps({"message": {"content": "n = 40"}, "done": True})]
+        with patch.object(Provider, "_stream_lines", return_value=iter(lines)):
+            got, thought = [], []
+            p = Provider("ollama-cloud", key="k", model="deepseek")
+            self.assertEqual(p.stream([{"role": "user", "content": "q"}], "", got.append, on_thinking=thought.append), "n = 40")
+            self.assertEqual("".join(thought), "Let me test n=40. 40^2+40+41=1681.")
+
+    def test_reasoning_only_reply_is_reported_not_crashed(self):
+        lines = [json.dumps({"message": {"thinking": "still thinking"}}), json.dumps({"message": {"content": ""}, "done": True})]
+        with patch.object(Provider, "_stream_lines", return_value=iter(lines)):
+            r = chat({"provider": {"name": "ollama-cloud", "key": "k", "model": "m"},
+                      "messages": [{"role": "user", "content": "q"}]}, None, on_delta=lambda t: None)
+        self.assertEqual(r["text"], "")
+        self.assertEqual(r["thinking"], "still thinking")
+        self.assertIn("reasoning", r["notice"])
+
+    def test_openrouter_reasoning_field(self):
+        lines = sse({"choices": [{"delta": {"reasoning": "hmm "}}]}, {"choices": [{"delta": {"content": "ok"}}]})
+        with patch.object(Provider, "_stream_lines", return_value=iter(lines)):
+            thought = []
+            self.assertEqual(Provider("openrouter", model="m").stream([{"role": "user", "content": "q"}], "",
+                             on_thinking=thought.append), "ok")
+            self.assertEqual(thought, ["hmm "])
+
+
 class ServeTests(unittest.TestCase):
     def test_concurrent_requests_and_stream(self):
         r, w = io.StringIO(), io.StringIO()

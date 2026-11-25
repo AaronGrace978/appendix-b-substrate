@@ -29,7 +29,7 @@ function startBridge() {
       let msg; try { msg = JSON.parse(line); } catch { continue; }
       const p = pending.get(msg.id);
       if (!p) continue;
-      if ('delta' in msg) { if (win && !win.isDestroyed()) win.webContents.send('lab:delta', {id: msg.id, delta: msg.delta}); continue; }
+      if ('delta' in msg || 'thinking' in msg) { if (win && !win.isDestroyed()) win.webContents.send('lab:delta', {id: msg.id, delta: msg.delta, thinking: msg.thinking}); continue; }
       pending.delete(msg.id); clearTimeout(p.timer);
       msg.ok ? p.resolve(msg.value) : p.reject(Error(msg.error));
     }

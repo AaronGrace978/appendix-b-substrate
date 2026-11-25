@@ -114,6 +114,15 @@ header{display:flex;gap:10px;align-items:center;padding:12px 20px;border-bottom:
 .sec-h{display:flex;align-items:center;gap:8px;font:700 10.5px var(--mono);letter-spacing:.16em;color:var(--c);margin-bottom:8px}
 .sec-h i{font-style:normal;opacity:.6}
 .msg.error .body{color:var(--red)}
+.think{margin:0 0 12px;border:1px solid var(--line);border-radius:10px;background:rgba(6,9,13,.55)}
+.think summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:8px 12px;font:600 11px var(--mono);letter-spacing:.08em;color:var(--dim);user-select:none}
+.think summary::-webkit-details-marker{display:none}
+.think summary::after{content:"▾";margin-left:auto;color:var(--faint);transition:transform .2s}
+.think:not([open]) summary::after{transform:rotate(-90deg)}
+.think .pulse{width:7px;height:7px;border-radius:50%;background:var(--violet);box-shadow:0 0 8px var(--violet);animation:blink 1s infinite}
+.think.done .pulse{animation:none;box-shadow:none;opacity:.6}
+.think-text{max-height:220px;overflow-y:auto;padding:0 14px 12px;white-space:pre-wrap;font:12.5px/1.6 var(--mono);color:var(--faint)}
+.body .notice{color:var(--amber);font-size:13.5px}
 .typing span{display:inline-block;width:6px;height:6px;margin-right:4px;border-radius:50%;background:var(--teal);animation:blink 1s infinite}
 .typing span:nth-child(2){animation-delay:.2s}.typing span:nth-child(3){animation-delay:.4s}
 .empty{max-width:620px;margin:10vh auto 0;text-align:center;padding:0 24px}
@@ -184,7 +193,7 @@ details pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--dim);max-he
 </head>
 <body>
 <aside>
-  <div class="brand"><div class="glyph">B</div><div><b>APPENDIX B</b><small>Cognitive Research Lab · v0.6.1</small></div></div>
+  <div class="brand"><div class="glyph">B</div><div><b>APPENDIX B</b><small>Cognitive Research Lab · v0.6.2</small></div></div>
   <nav role="tablist">
     <button role="tab" id="tabChat" aria-selected="true" data-view="chatView"><i></i>Chat</button>
     <button role="tab" id="tabLab" aria-selected="false" data-view="labView"><i></i>Experiment</button>

@@ -156,6 +156,12 @@ jobs:
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Streaming chat with independent checks
 
+          **New in 0.6.2: reasoning models fixed**
+          - **No more "empty model output"** with reasoning models such as DeepSeek v4 Pro, Kimi and gpt-oss on Ollama Cloud. Their reasoning now streams live in a collapsible **Reasoning** panel, followed by the answer.
+          - **Higher output limits** (32k tokens; 16k for Anthropic) so a model has room to reason and still answer.
+          - If a model only reasons and never answers, you see its reasoning plus a clear note, and your prompt goes back into the box so you can retry.
+          - Replies cut off at the output limit are labelled; old error cards clear when you send again.
+
           **New in 0.6.1**
           - **Scrolling fixed.** Only the conversation scrolls; the header, model picker and sidebar stay in place. A *Latest* button appears when you scroll up during a reply.
           - **Readable replies.** Markdown renders properly (paragraphs, numbered and bulleted lists, bold, italics, headings, code blocks). Each protocol phase is its own colored card.

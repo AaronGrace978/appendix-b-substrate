@@ -22,6 +22,14 @@ PROVIDERS = {
 }
 
 
+MAX_OUT = 32768      # reasoning models spend output tokens thinking before answering
+ANTHROPIC_OUT = 16000
+
+
+EMPTY_HINT = ("the model used its whole output budget reasoning and returned no final answer; "
+              "try again, ask a narrower question, or pick a non-reasoning model")
+
+
 class Provider:
     def __init__(self, name, key="", model=""):
         self.name = name
@@ -65,14 +73,14 @@ class Provider:
             raise ValueError("select a model")
         self.calls += 1
         if self.name == "openai":
-            body = {"model": self.model, "input": messages, "max_output_tokens": 4096, "store": False}
+            body = {"model": self.model, "input": messages, "max_output_tokens": MAX_OUT, "store": False}
             if system:
                 body["instructions"] = system
             data = self.request("/responses", body)
             out = "".join(c["text"] for m in data.get("output", []) if m.get("type") == "message"
                           for c in m.get("content", []) if c.get("type") == "output_text")
         elif self.name == "anthropic":
-            body = {"model": self.model, "max_tokens": 4096, "messages": messages}
+            body = {"model": self.model, "max_tokens": ANTHROPIC_OUT, "messages": messages}
             if system:
                 body["system"] = system
             data = self.request("/messages", body)
@@ -81,15 +89,18 @@ class Provider:
             full = ([{"role": "system", "content": system}] if system else []) + messages
             if self.name.startswith("ollama"):
                 data = self.request("/chat", {"model": self.model, "stream": False, "messages": full,
-                                              "options": {"num_predict": 4096}})
-                out = data["message"]["content"]
+                                              "options": {"num_predict": MAX_OUT}})
+                out = data["message"].get("content") or ""
+                self.last_thinking = data["message"].get("thinking") or ""
             else:
-                data = self.request("/chat/completions", {"model": self.model, "max_tokens": 4096,
+                data = self.request("/chat/completions", {"model": self.model, "max_tokens": MAX_OUT,
                                                           "messages": full})
-                out = data["choices"][0]["message"]["content"]
+                msg = data["choices"][0]["message"]
+                out = msg.get("content") or ""
+                self.last_thinking = msg.get("reasoning") or msg.get("reasoning_content") or ""
         self.usage.append(data.get("usage") or {k: data[k] for k in ("prompt_eval_count", "eval_count") if k in data})
         if not isinstance(out, str) or not out.strip():
-            raise ValueError("empty model output")
+            raise ValueError(EMPTY_HINT if getattr(self, "last_thinking", "") else "empty model output")
         return out
 
     def _stream_lines(self, path, body, cancelled):
@@ -120,12 +131,18 @@ class Provider:
                 if line:
                     yield line
 
-    def stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False):
+    def stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False, on_thinking=lambda s: None):
         """Stream a multi-turn reply, calling on_delta with each text fragment."""
         if not self.model:
             raise ValueError("select a model")
         self.calls += 1
-        parts, usage = [], {}
+        parts, thoughts, usage = [], [], {}
+        self.stop_reason = ""
+
+        def think(text):
+            if text:
+                thoughts.append(text)
+                on_thinking(text)
 
         def sse(lines):
             for line in lines:
@@ -144,33 +161,40 @@ class Provider:
                 on_delta(text)
 
         if self.name == "openai":
-            body = {"model": self.model, "input": messages, "max_output_tokens": 4096, "store": False, "stream": True}
+            body = {"model": self.model, "input": messages, "max_output_tokens": MAX_OUT, "store": False, "stream": True}
             if system:
                 body["instructions"] = system
             for ev in sse(self._stream_lines("/responses", body, cancelled)):
                 if ev.get("type") == "response.output_text.delta":
                     emit(ev.get("delta", ""))
+                elif ev.get("type") == "response.reasoning_summary_text.delta":
+                    think(ev.get("delta", ""))
                 elif ev.get("type") == "response.completed":
                     usage = (ev.get("response") or {}).get("usage") or {}
+                elif ev.get("type") == "response.incomplete":
+                    self.stop_reason = "length"
                 elif ev.get("type") in ("error", "response.failed"):
                     raise RuntimeError("openai: " + json.dumps(ev.get("error") or ev.get("response", {}).get("error"))[:300])
         elif self.name == "anthropic":
-            body = {"model": self.model, "max_tokens": 4096, "messages": messages, "stream": True}
+            body = {"model": self.model, "max_tokens": ANTHROPIC_OUT, "messages": messages, "stream": True}
             if system:
                 body["system"] = system
             for ev in sse(self._stream_lines("/messages", body, cancelled)):
                 t = ev.get("type")
                 if t == "content_block_delta" and ev["delta"].get("type") == "text_delta":
                     emit(ev["delta"]["text"])
+                elif t == "content_block_delta" and ev["delta"].get("type") == "thinking_delta":
+                    think(ev["delta"].get("thinking", ""))
                 elif t == "message_start":
                     usage.update((ev.get("message") or {}).get("usage") or {})
                 elif t == "message_delta":
                     usage.update(ev.get("usage") or {})
+                    self.stop_reason = (ev.get("delta") or {}).get("stop_reason") or ""
                 elif t == "error":
                     raise RuntimeError("anthropic: " + str((ev.get("error") or {}).get("message", ""))[:300])
         elif self.name.startswith("ollama"):
             full = ([{"role": "system", "content": system}] if system else []) + messages
-            body = {"model": self.model, "stream": True, "messages": full, "options": {"num_predict": 4096}}
+            body = {"model": self.model, "stream": True, "messages": full, "options": {"num_predict": MAX_OUT}}
             for line in self._stream_lines("/chat", body, cancelled):
                 try:
                     ev = json.loads(line)
@@ -178,22 +202,29 @@ class Provider:
                     continue
                 if ev.get("error"):
                     raise RuntimeError(f"{self.name}: {str(ev['error'])[:300]}")
-                emit((ev.get("message") or {}).get("content", ""))
+                think((ev.get("message") or {}).get("thinking") or "")
+                emit((ev.get("message") or {}).get("content") or "")
                 if ev.get("done"):
                     usage = {k: ev[k] for k in ("prompt_eval_count", "eval_count") if k in ev}
+                    self.stop_reason = ev.get("done_reason") or ""
         else:
             full = ([{"role": "system", "content": system}] if system else []) + messages
-            body = {"model": self.model, "max_tokens": 4096, "messages": full, "stream": True}
+            body = {"model": self.model, "max_tokens": MAX_OUT, "messages": full, "stream": True}
             for ev in sse(self._stream_lines("/chat/completions", body, cancelled)):
                 if ev.get("error"):
                     raise RuntimeError("openrouter: " + str(ev["error"])[:300])
                 for choice in ev.get("choices") or []:
-                    emit((choice.get("delta") or {}).get("content") or "")
+                    if choice.get("finish_reason"):
+                        self.stop_reason = choice["finish_reason"]
+                    d = choice.get("delta") or {}
+                    think(d.get("reasoning") or d.get("reasoning_content") or "")
+                    emit(d.get("content") or "")
                 if ev.get("usage"):
                     usage = ev["usage"]
         self.usage.append(usage)
         text = "".join(parts)
-        if not text.strip() and not cancelled():
+        self.last_thinking = "".join(thoughts)
+        if not text.strip() and not cancelled() and not self.last_thinking.strip():
             raise ValueError("empty model output")
         return text
 
@@ -235,7 +266,7 @@ SUBSTRATE_PROMPT = (
 )
 
 
-def chat(req, directory=None, on_delta=None, cancelled=lambda: False):
+def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None):
     messages = req.get("messages")
     if type(messages) is not list or not 1 <= len(messages) <= 200:
         raise ValueError("messages must be a list of 1-200 turns")
@@ -259,13 +290,20 @@ def chat(req, directory=None, on_delta=None, cancelled=lambda: False):
     if on_delta is None:
         text = p.complete(clean, system)
     else:
-        text = p.stream(clean, system, on_delta, cancelled)
+        text = p.stream(clean, system, on_delta, cancelled, on_thinking)
+    thinking = getattr(p, "last_thinking", "")
+    if not text.strip() and not cancelled():
+        # Reasoning arrived but no answer: report it rather than failing silently.
+        return {"text": "", "thinking": thinking, "notice": EMPTY_HINT, "usage": p.usage[-1] if p.usage else {},
+                "seconds": time.monotonic() - start, "provider": p.name, "model": p.model,
+                "checks": [], "state": None, "cancelled": False}
     checks = extract_checks(text) if req.get("verify", True) else []
     state = None
     if directory is not None and checks:
         state = observe_checks(directory, p, checks)
     return {"text": text, "usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,
-            "provider": p.name, "model": p.model, "checks": checks, "state": state,
+            "provider": p.name, "model": p.model, "checks": checks, "state": state, "thinking": thinking,
+            "truncated": getattr(p, "stop_reason", "") in ("length", "max_tokens", "max_output_tokens"),
             "cancelled": bool(cancelled())}
 
 
@@ -344,14 +382,14 @@ def run(req, directory):
         rt.close()
 
 
-def handle(req, directory, on_delta=None, cancelled=lambda: False):
+def handle(req, directory, on_delta=None, cancelled=lambda: False, on_thinking=lambda s: None):
     action = req.get("action")
     if action == "models":
         return Provider(**req["provider"]).models()
     if action == "run":
         return run(req, directory)
     if action == "chat":
-        return chat(req, directory, on_delta, cancelled)
+        return chat(req, directory, on_delta, cancelled, on_thinking)
     if action == "state":
         return chat_state(req, directory)
     raise ValueError("unknown action")
@@ -372,7 +410,8 @@ def serve(directory, stdin=sys.stdin, stdout=sys.stdout):
         flag = cancels.setdefault(rid, threading.Event())
         try:
             on_delta = (lambda t: send({"id": rid, "delta": t})) if req.get("stream") else None
-            value = handle(req, directory, on_delta, flag.is_set)
+            on_thinking = (lambda t: send({"id": rid, "thinking": t})) if req.get("stream") else (lambda t: None)
+            value = handle(req, directory, on_delta, flag.is_set, on_thinking)
             send({"id": rid, "ok": True, "value": value})
         except Exception as exc:
             send({"id": rid, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
