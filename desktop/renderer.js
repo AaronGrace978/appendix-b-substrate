@@ -94,42 +94,97 @@ $('protocol').onchange = () => store.set('protocol', $('protocol').checked ? '1'
 
 function el(tag, cls, text, parent) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (parent) parent.append(e); return e; }
 
-function renderBody(text, target) {
-  const parts = text.replace(/\n{3,}/g, '\n\n').split(/```[\w+-]*\n?/);
-  parts.forEach((part, i) => {
-    if (i % 2) { el('pre', '', part.replace(/\n$/, ''), target); return; }
-    for (const line of part.split('\n')) {
-      const m = line.match(/^\s*(?:#{1,4}\s*)?\**(DECOMPOSE|ATTACK|VERIFY|CONCLUDE|CONCLUSION)\**\s*:?\**\s*(.*)$/i);
-      if (m) {
-        const key = m[1].toUpperCase() === 'CONCLUSION' ? 'CONCLUDE' : m[1].toUpperCase();
-        const badge = el('span', 'ph', key, target); badge.style.color = PHASE_COLORS[key]; badge.style.borderColor = PHASE_COLORS[key];
-        if (m[2]) { inline(m[2], target); target.append('\n'); }
-        continue;
-      }
-      inline(line, target); target.append('\n');
-    }
-  });
-  if (target.lastChild && target.lastChild.nodeType === 3) target.lastChild.textContent = target.lastChild.textContent.replace(/\n+$/, '');
+const PHASE_NUM = {DECOMPOSE:'01', ATTACK:'02', VERIFY:'03', CONCLUDE:'04'};
+function phaseOf(line) {
+  const m = line.match(/^\s*(?:#{1,4}\s*)?\**\s*([A-Za-z]+)\s*\**\s*:?\s*\**\s*(.*)$/);
+  if (!m) return null;
+  let word = m[1].toUpperCase(); if (word === 'CONCLUSION') word = 'CONCLUDE';
+  if (!PHASE_NUM[word]) return null;
+  // Uppercase heading word, or the word alone on its line; avoids "Attack this claim…" prose.
+  if (m[1] !== m[1].toUpperCase() && m[2].trim()) return null;
+  return {key: word, rest: m[2].trim()};
 }
-function inline(line, target) {
-  line.split(/(`[^`]+`)/).forEach(seg => {
+
+function inline(text, target) {
+  for (const seg of text.split(/(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*?\*|_[^_\s][^_]*?_(?!\w))/)) {
+    if (!seg) continue;
     if (/^`[^`]+`$/.test(seg)) el('code', '', seg.slice(1, -1), target);
-    else target.append(seg.replace(/\*\*(.+?)\*\*/g, '$1'));
-  });
+    else if (/^(\*\*|__).+\1$/.test(seg)) inline(seg.slice(2, -2), el('strong', '', null, target));
+    else if (/^[*_].+[*_]$/.test(seg) && seg.length > 2) el('em', '', seg.slice(1, -1), target);
+    else target.append(seg);
+  }
 }
+
+function renderBody(text, target) {
+  target.replaceChildren(); target.classList.remove('streaming');
+  const lines = String(text).replace(/\r/g, '').split('\n');
+  let box = target, para = [], list = null, listKind = '';
+  const flush = () => {
+    if (para.length) { const p = el('p', '', null, box); para.forEach((l, i) => { if (i) p.append(el('br')); inline(l, p); }); para = []; }
+  };
+  const endList = () => { list = null; listKind = ''; };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(/^\s*```/);
+    if (fence) {
+      flush(); endList();
+      const code = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i]);
+      el('code', '', code.join('\n'), el('pre', '', null, box));
+      continue;
+    }
+    const ph = phaseOf(line);
+    if (ph) {
+      flush(); endList();
+      box = el('section', 'sec', null, target);
+      box.style.setProperty('--c', PHASE_COLORS[ph.key]);
+      const h = el('div', 'sec-h', null, box); el('i', '', PHASE_NUM[ph.key], h); h.append(ph.key);
+      if (ph.rest) para.push(ph.rest);
+      continue;
+    }
+    if (!line.trim()) { flush(); endList(); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); endList(); el('hr', '', null, box); continue; }
+    const hd = line.match(/^\s*#{1,4}\s+(.*)$/);
+    if (hd) { flush(); endList(); inline(hd[1].replace(/\*\*/g, ''), el('h3', '', null, box)); continue; }
+    const li = line.match(/^\s*([-*•+]|\d+[.)])\s+(.*)$/);
+    if (li) {
+      flush();
+      const kind = /\d/.test(li[1]) ? 'ol' : 'ul';
+      if (!list || listKind !== kind) { list = el(kind, '', null, box); listKind = kind; if (kind === 'ol') list.start = parseInt(li[1], 10) || 1; }
+      inline(li[2], el('li', '', null, list));
+      continue;
+    }
+    if (list && /^\s{2,}\S/.test(line)) { const last = list.lastElementChild; last.append(' '); inline(line.trim(), last); continue; }
+    endList(); para.push(line.trim());
+  }
+  flush();
+}
+
+function nearBottom() { const log = $('log'); return log.scrollHeight - log.scrollTop - log.clientHeight < 140; }
+function toBottom() { const log = $('log'); log.scrollTop = log.scrollHeight; $('jump').hidden = true; }
 
 function addMessage(role, text, meta='') {
   $('empty')?.remove();
+  const stick = nearBottom();
   const row = el('div', 'msg ' + role, null, $('thread'));
-  el('div', 'av', role === 'user' ? 'YOU' : role === 'error' ? '!' : 'B', row);
+  if (role === 'user') { el('div', 'bubble', text, row); if (stick || true) toBottom(); return row; }
+  el('div', 'av', role === 'error' ? '!' : 'B', row);
   const col = el('div', '', null, row);
-  const who = el('div', 'who', role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Model', col);
-  if (meta) el('em', '', meta, who);
+  const who = el('div', 'who', null, col);
+  who.append(role === 'error' ? 'Error' : 'Model');
+  el('em', 'meta', meta, who);
+  if (role === 'assistant') {
+    const copy = el('button', 'copy', 'Copy', who); copy.type = 'button';
+    copy.onclick = async () => { try { await navigator.clipboard.writeText(row.dataset.raw || ''); copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy', 1200); } catch {} };
+  }
+  row.dataset.raw = text;
   const body = el('div', 'body', null, col);
   if (role === 'assistant') renderBody(text, body); else body.textContent = text;
-  $('log').scrollTop = $('log').scrollHeight;
+  if (stick) toBottom();
   return row;
 }
+$('log').addEventListener('scroll', () => { if (nearBottom()) $('jump').hidden = true; });
+$('jump').onclick = toBottom;
 
 function renderChecks(checks, col) {
   if (!checks || !checks.length) return;
@@ -156,6 +211,7 @@ async function send() {
   const row = addMessage('assistant', '');
   const body = row.querySelector('.body');
   body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+  body.classList.add('streaming');
   cancelled = false;
   const id = await window.lab.newId(); chatId = id; setChatBusy(true);
   status('Streaming · ' + p.model, 'busy');
@@ -164,19 +220,22 @@ async function send() {
   const off = window.lab.onDelta(m => {
     if (m.id !== id) return;
     if (first) { body.textContent = ''; first = false; }
+    const stick = nearBottom();
     streamed += m.delta; body.textContent = streamed;
-    const log = $('log'); if (log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
+    if (stick) $('log').scrollTop = $('log').scrollHeight; else $('jump').hidden = false;
   });
   try {
     const r = await window.lab.request({action:'chat', stream:true, provider:p, messages:history, protocol:$('protocol').checked}, id);
     const reply = r.text || streamed;
     if (!reply.trim()) throw Error(r.cancelled ? 'Stopped before any text arrived.' : 'Empty reply');
     history.push({role:'assistant', content:reply});
-    body.replaceChildren(); renderBody(reply, body);
+    const stick = nearBottom();
+    row.dataset.raw = reply; renderBody(reply, body);
     const u = r.usage || {};
     const tokens = (u.output_tokens ?? u.completion_tokens ?? u.eval_count);
-    el('em', '', r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : ''), row.querySelector('.who'));
+    row.querySelector('.who .meta').textContent = r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : '');
     renderChecks(r.checks, body.parentElement);
+    if (stick) toBottom();
     if (r.state) gauges(r.state, r.model);
     $('usage').textContent = Math.floor(history.length / 2) + ' turns' + (r.checks && r.checks.length ? ' · ' + r.checks.length + ' claims checked' : '');
     status(labelOf(p.name) + ' · ' + p.model, 'ok');

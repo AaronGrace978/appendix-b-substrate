@@ -156,6 +156,11 @@ jobs:
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Streaming chat with independent checks
 
+          **New in 0.6.1**
+          - **Scrolling fixed.** Only the conversation scrolls; the header, model picker and sidebar stay in place. A *Latest* button appears when you scroll up during a reply.
+          - **Readable replies.** Markdown renders properly (paragraphs, numbered and bulleted lists, bold, italics, headings, code blocks). Each protocol phase is its own colored card.
+          - **Chat polish.** Your messages are right-aligned bubbles; each model reply has a Copy button.
+
           **New in 0.6**
           - **Streaming replies.** One long-running substrate process replaces a fresh Python launch per request; text appears as the model writes it, and **Stop** cancels just that reply.
           - **Chat and experiments run at the same time** (requests are handled concurrently by id).
