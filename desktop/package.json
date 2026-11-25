@@ -1,0 +1,13 @@
+{
+  "name": "appendix-b-desktop-lab",
+  "version": "0.4.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js"
+  },
+  "devDependencies": {
+    "electron": "45.5.0"
+  }
+}
