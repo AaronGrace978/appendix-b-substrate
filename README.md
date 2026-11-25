@@ -102,3 +102,16 @@ Next: collect documented traces, define an annotation rubric, use held-out
 tasks, and compare adaptive, fixed, and rotation-only controllers with real
 model callbacks, matched token/tool budgets and independent scoring.
 Measure accuracy, abstention, counterexample recovery, cost and robustness.
+
+
+## Appendix B Desktop Lab — Windows preview
+
+See [desktop setup and Windows release instructions](desktop/README.md).
+The experimental desktop lab supports OpenAI, Anthropic, OpenRouter, Ollama
+Cloud and Ollama Local. The Windows release pipeline packages a portable
+x64 Electron application with Python, and publishes a prerelease only after
+automated tests and a packaged launch check succeed.
+
+## Credits
+
+With credit to [DinoClaw](https://github.com/AaronGrace978/DinoClaw).
