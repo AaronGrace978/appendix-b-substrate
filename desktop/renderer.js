@@ -72,7 +72,17 @@ const labelOf = v => (PROVIDERS.find(p => p[0] === v) || [,v])[1];
 const clean = m => String(m).replace(/^Error invoking remote method '[^']+': (Error: )?/, '').replace(/^\w+Error: /, '');
 $('discover').onclick = () => discover(false);
 $('reviewDiscover').onclick = () => discover(true);
-$('provider').onchange = () => { store.set('provider', $('provider').value); $('key').value=''; discover(false, true); };
+// Keys are remembered per provider for this session only (memory, never disk).
+const sessionKeys = {};
+let lastProvider = $('provider').value;
+$('provider').onchange = () => {
+  sessionKeys[lastProvider] = $('key').value;
+  lastProvider = $('provider').value;
+  $('key').value = sessionKeys[lastProvider] || '';
+  store.set('provider', lastProvider);
+  discover(false, true);
+};
+$('key').addEventListener('input', () => { sessionKeys[$('provider').value] = $('key').value; });
 $('key').addEventListener('keydown', e => { if (e.key === 'Enter') discover(false); });
 function updateReady(){ const m = modelValue('modelSelect','model'); if (!chatId && !labId && m) status(labelOf($('provider').value)+' · '+m, 'ok'); }
 async function loadState() {

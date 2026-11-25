@@ -161,6 +161,7 @@ jobs:
           - **Higher output limits** (32k tokens; 16k for Anthropic) so a model has room to reason and still answer.
           - If a model only reasons and never answers, you see its reasoning plus a clear note, and your prompt goes back into the box so you can retry.
           - Replies cut off at the output limit are labelled; old error cards clear when you send again.
+          - Switching providers no longer wipes your API key. Keys are remembered per provider for the session, in memory only.
 
           **New in 0.6.1**
           - **Scrolling fixed.** Only the conversation scrolls; the header, model picker and sidebar stay in place. A *Latest* button appears when you scroll up during a reply.
