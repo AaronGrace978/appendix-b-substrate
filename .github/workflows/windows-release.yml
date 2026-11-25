@@ -3,7 +3,7 @@ name: Windows release
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/windows-release.yml', 'desktop/**', 'desktop_bridge.py', 'behavioral.py', 'runtime_v2.py']
+    paths: ['.github/workflows/windows-release.yml', 'desktop/**', 'desktop_bridge.py', 'behavioral.py', 'runtime_v2.py', 'chat_checks.py']
     tags: ['v*']
   workflow_dispatch:
 
@@ -68,7 +68,7 @@ jobs:
           foreach ($file in @('main.cjs','preload.cjs','index.html','renderer.js','README.md','icon.png','icon.ico')) {
             Copy-Item -LiteralPath "desktop/$file" -Destination $desktop
           }
-          foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','README.md')) {
+          foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','chat_checks.py','README.md')) {
             Copy-Item -LiteralPath $file -Destination $appDir
           }
           @{name='appendix-b-desktop-lab'; productName='Appendix B'; version=$env:APP_VERSION; main='desktop/main.cjs'} | ConvertTo-Json | Set-Content (Join-Path $appDir 'package.json') -Encoding utf8
@@ -154,12 +154,15 @@ jobs:
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Host 'Release already exists; keeping existing assets.'; exit 0 }
           $notes = @"
-          ## Appendix B v$($env:APP_VERSION) — Chat + redesigned lab
+          ## Appendix B v$($env:APP_VERSION) — Streaming chat with independent checks
 
-          **New**
-          - **Chat tab**: talk to any model directly, multi-turn, with a model dropdown populated from the provider's live catalog (plus a custom-ID option).
-          - **Protocol toggle**: makes the model answer through DECOMPOSE → ATTACK → VERIFY → CONCLUDE, with each phase badged in the reply.
-          - **Redesigned interface** built around the substrate: protocol rail, live state gauges, verdict-coded experiment results.
+          **New in 0.6**
+          - **Streaming replies.** One long-running substrate process replaces a fresh Python launch per request; text appears as the model writes it, and **Stop** cancels just that reply.
+          - **Chat and experiments run at the same time** (requests are handled concurrently by id).
+          - **Independent checks in chat.** Arithmetic, primality and letter-count claims in a reply are recomputed in Python and shown as ✓ / ✗ under the message. A model that writes 91 is prime gets caught.
+          - **Chat feeds the substrate.** Each checked claim updates that model's persistent state (surprise, strain, confidence…), shown in the side rail and kept across sessions.
+
+          Also includes 0.5: chat tab, live model dropdown, Protocol mode, redesigned interface, app icon.
 
           **Install (Windows x64)**
           Download and run ``Appendix-B-Setup-v$($env:APP_VERSION)-win-x64.exe``. Python and Electron are bundled; nothing else to install.

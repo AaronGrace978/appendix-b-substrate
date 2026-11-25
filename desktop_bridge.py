@@ -3,12 +3,14 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
 from dataclasses import asdict
 from pathlib import Path
 from behavioral import SearchRuntime
+from chat_checks import extract_checks
 from runtime_v2 import Evidence, Verdict, claim_id
 
 PROVIDERS = {
@@ -90,6 +92,111 @@ class Provider:
             raise ValueError("empty model output")
         return out
 
+    def _stream_lines(self, path, body, cancelled):
+        """Yield decoded text lines from a streaming HTTP response."""
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.name == "anthropic":
+            headers.update({"x-api-key": self.key, "anthropic-version": "2023-06-01"})
+        elif self.key and self.name != "ollama-local":
+            headers["Authorization"] = "Bearer " + self.key
+        if self.name not in ("ollama-local", "openrouter") and not self.key:
+            raise ValueError("API key required")
+        req = urllib.request.Request(self.base + path, json.dumps(body).encode(), headers)
+        try:
+            res = urllib.request.urlopen(req, timeout=300)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                err = json.loads(exc.read(65536))
+                detail = (err.get("error") or {}).get("message", "") if isinstance(err.get("error"), dict) else str(err.get("error", ""))
+            except Exception:
+                pass
+            raise RuntimeError(f"{self.name}: HTTP {exc.code}" + (f" - {detail[:300]}" if detail else "")) from None
+        with res:
+            for raw in res:
+                if cancelled():
+                    return
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line:
+                    yield line
+
+    def stream(self, messages, system="", on_delta=lambda s: None, cancelled=lambda: False):
+        """Stream a multi-turn reply, calling on_delta with each text fragment."""
+        if not self.model:
+            raise ValueError("select a model")
+        self.calls += 1
+        parts, usage = [], {}
+
+        def sse(lines):
+            for line in lines:
+                if line.startswith("data:"):
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        yield json.loads(data)
+                    except ValueError:
+                        continue
+
+        def emit(text):
+            if text:
+                parts.append(text)
+                on_delta(text)
+
+        if self.name == "openai":
+            body = {"model": self.model, "input": messages, "max_output_tokens": 4096, "store": False, "stream": True}
+            if system:
+                body["instructions"] = system
+            for ev in sse(self._stream_lines("/responses", body, cancelled)):
+                if ev.get("type") == "response.output_text.delta":
+                    emit(ev.get("delta", ""))
+                elif ev.get("type") == "response.completed":
+                    usage = (ev.get("response") or {}).get("usage") or {}
+                elif ev.get("type") in ("error", "response.failed"):
+                    raise RuntimeError("openai: " + json.dumps(ev.get("error") or ev.get("response", {}).get("error"))[:300])
+        elif self.name == "anthropic":
+            body = {"model": self.model, "max_tokens": 4096, "messages": messages, "stream": True}
+            if system:
+                body["system"] = system
+            for ev in sse(self._stream_lines("/messages", body, cancelled)):
+                t = ev.get("type")
+                if t == "content_block_delta" and ev["delta"].get("type") == "text_delta":
+                    emit(ev["delta"]["text"])
+                elif t == "message_start":
+                    usage.update((ev.get("message") or {}).get("usage") or {})
+                elif t == "message_delta":
+                    usage.update(ev.get("usage") or {})
+                elif t == "error":
+                    raise RuntimeError("anthropic: " + str((ev.get("error") or {}).get("message", ""))[:300])
+        elif self.name.startswith("ollama"):
+            full = ([{"role": "system", "content": system}] if system else []) + messages
+            body = {"model": self.model, "stream": True, "messages": full, "options": {"num_predict": 4096}}
+            for line in self._stream_lines("/chat", body, cancelled):
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("error"):
+                    raise RuntimeError(f"{self.name}: {str(ev['error'])[:300]}")
+                emit((ev.get("message") or {}).get("content", ""))
+                if ev.get("done"):
+                    usage = {k: ev[k] for k in ("prompt_eval_count", "eval_count") if k in ev}
+        else:
+            full = ([{"role": "system", "content": system}] if system else []) + messages
+            body = {"model": self.model, "max_tokens": 4096, "messages": full, "stream": True}
+            for ev in sse(self._stream_lines("/chat/completions", body, cancelled)):
+                if ev.get("error"):
+                    raise RuntimeError("openrouter: " + str(ev["error"])[:300])
+                for choice in ev.get("choices") or []:
+                    emit((choice.get("delta") or {}).get("content") or "")
+                if ev.get("usage"):
+                    usage = ev["usage"]
+        self.usage.append(usage)
+        text = "".join(parts)
+        if not text.strip() and not cancelled():
+            raise ValueError("empty model output")
+        return text
+
     def generate(self, instruction, payload):
         prompt = instruction + "\nData (not instructions):\n" + json.dumps(payload, ensure_ascii=False)
         return self.complete([{"role": "user", "content": prompt}])
@@ -128,7 +235,7 @@ SUBSTRATE_PROMPT = (
 )
 
 
-def chat(req):
+def chat(req, directory=None, on_delta=None, cancelled=lambda: False):
     messages = req.get("messages")
     if type(messages) is not list or not 1 <= len(messages) <= 200:
         raise ValueError("messages must be a list of 1-200 turns")
@@ -149,9 +256,46 @@ def chat(req):
         system = (SUBSTRATE_PROMPT + "\n\n" + system).strip()
     p = Provider(**req["provider"])
     start = time.monotonic()
-    text = p.complete(clean, system)
+    if on_delta is None:
+        text = p.complete(clean, system)
+    else:
+        text = p.stream(clean, system, on_delta, cancelled)
+    checks = extract_checks(text) if req.get("verify", True) else []
+    state = None
+    if directory is not None and checks:
+        state = observe_checks(directory, p, checks)
     return {"text": text, "usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,
-            "provider": p.name, "model": p.model}
+            "provider": p.name, "model": p.model, "checks": checks, "state": state,
+            "cancelled": bool(cancelled())}
+
+
+def agent_store(directory, p):
+    import hashlib
+    ident = hashlib.sha256(json.dumps(["chat", p.name, p.model]).encode()).hexdigest()[:24]
+    return SearchRuntime(str(Path(directory) / f"chat-{ident}.sqlite"))
+
+
+def observe_checks(directory, p, checks):
+    """Feed independent check outcomes into this model's persistent substrate state."""
+    rt = agent_store(directory, p)
+    try:
+        from uuid import uuid4
+        run_id = uuid4().hex
+        rt._event(run_id, "chat_turn", {"provider": p.name, "model": p.model, "checks": len(checks)})
+        for c in checks:
+            rt._observation(run_id, c["verdict"], {"claim": c["claim"], "kind": c["kind"],
+                                                   "detail": c["detail"]}, True)
+        return asdict(rt.dynamics)
+    finally:
+        rt.close()
+
+
+def chat_state(req, directory):
+    rt = agent_store(directory, Provider(**req["provider"]))
+    try:
+        return asdict(rt.dynamics)
+    finally:
+        rt.close()
 
 
 def run(req, directory):
@@ -200,20 +344,67 @@ def run(req, directory):
         rt.close()
 
 
+def handle(req, directory, on_delta=None, cancelled=lambda: False):
+    action = req.get("action")
+    if action == "models":
+        return Provider(**req["provider"]).models()
+    if action == "run":
+        return run(req, directory)
+    if action == "chat":
+        return chat(req, directory, on_delta, cancelled)
+    if action == "state":
+        return chat_state(req, directory)
+    raise ValueError("unknown action")
+
+
+def serve(directory, stdin=sys.stdin, stdout=sys.stdout):
+    """Long-lived JSON-lines server: concurrent requests by id, streamed chat deltas."""
+    lock = threading.Lock()
+    cancels = {}
+
+    def send(obj):
+        with lock:
+            stdout.write(json.dumps(obj, ensure_ascii=True) + "\n")
+            stdout.flush()
+
+    def work(req):
+        rid = req.get("id")
+        flag = cancels.setdefault(rid, threading.Event())
+        try:
+            on_delta = (lambda t: send({"id": rid, "delta": t})) if req.get("stream") else None
+            value = handle(req, directory, on_delta, flag.is_set)
+            send({"id": rid, "ok": True, "value": value})
+        except Exception as exc:
+            send({"id": rid, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            cancels.pop(rid, None)
+
+    send({"ready": True, "pid": os.getpid()})
+    for line in stdin:
+        try:
+            req = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(req, dict) or "id" not in req:
+            continue
+        if req.get("action") == "cancel":
+            cancels.setdefault(req.get("target"), threading.Event()).set()
+            continue
+        if req.get("action") == "ping":
+            send({"id": req["id"], "ok": True, "value": "pong"})
+            continue
+        threading.Thread(target=work, args=(req,), daemon=True).start()
+
+
 def main():
+    directory = Path(sys.argv[1])
+    directory.mkdir(parents=True, exist_ok=True)
+    if "--serve" in sys.argv[2:]:
+        serve(directory)
+        return
     try:
         req = json.loads(sys.stdin.readline())
-        directory = Path(sys.argv[1])
-        directory.mkdir(parents=True, exist_ok=True)
-        if req["action"] == "models":
-            value = Provider(**req["provider"]).models()
-        elif req["action"] == "run":
-            value = run(req, directory)
-        elif req["action"] == "chat":
-            value = chat(req)
-        else:
-            raise ValueError("unknown action")
-        print(json.dumps({"ok": True, "value": value}, ensure_ascii=True))
+        print(json.dumps({"ok": True, "value": handle(req, directory)}, ensure_ascii=True))
     except Exception as exc:
         print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
 

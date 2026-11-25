@@ -148,13 +148,18 @@ header{display:flex;gap:10px;align-items:center;padding:12px 20px;border-bottom:
 details summary{cursor:pointer;color:var(--dim);font:12px var(--mono)}
 details pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--dim);max-height:340px;overflow:auto}
 .metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.checks{display:grid;gap:6px;margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:rgba(6,9,13,.6)}
+.check{display:grid;grid-template-columns:18px auto 1fr;gap:8px;align-items:baseline;font:12.5px var(--mono)}
+.check b{font-weight:700}.check.supported b{color:var(--green)}.check.refuted b{color:var(--red)}
+.check span{color:var(--ink)}.check.refuted span{text-decoration:line-through;text-decoration-color:rgba(255,123,114,.6)}
+.check em{font-style:normal;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#1d2733;border-radius:6px;border:2px solid var(--bg)}::-webkit-scrollbar-track{background:transparent}
 [hidden]{display:none!important}
 </style>
 </head>
 <body>
 <aside>
-  <div class="brand"><div class="glyph">B</div><div><b>APPENDIX B</b><small>Cognitive Research Lab · v0.5</small></div></div>
+  <div class="brand"><div class="glyph">B</div><div><b>APPENDIX B</b><small>Cognitive Research Lab · v0.6</small></div></div>
   <nav role="tablist">
     <button role="tab" id="tabChat" aria-selected="true" data-view="chatView"><i></i>Chat</button>
     <button role="tab" id="tabLab" aria-selected="false" data-view="labView"><i></i>Experiment</button>
@@ -192,7 +197,7 @@ details pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--dim);max-he
       <div class="empty" id="empty">
         <div class="glyph" style="margin:0 auto;width:46px;height:46px;font-size:20px">B</div>
         <h2>Talk to the model</h2>
-        <p>Pick a provider and model above. Turn on <b>Protocol</b> to make it answer through decompose → attack → verify → conclude.</p>
+        <p>Pick a provider and model above. Turn on <b>Protocol</b> to make it answer through decompose → attack → verify → conclude. Arithmetic, primality and letter-count claims in replies are checked independently in Python and feed the substrate state.</p>
         <div class="chips">
           <button class="chip">Is every number of the form n² + n + 41 prime?</button>
           <button class="chip">How many r's are in "strawberry"? Show your checks.</button>

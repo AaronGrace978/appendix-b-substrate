@@ -16,16 +16,15 @@ $('provider').value = store.get('provider') || 'openai';
 /* ── status ───────────────────────────── */
 function status(text, state='') { $('status').textContent = text; $('status').title = text; $('dot').className = 'dot ' + state; }
 
-/* ── busy lock (bridge runs one request at a time) ── */
-let busy = false, cancelled = false;
-function lock(value, mode='') {
-  busy = value;
-  for (const id of ['run','discover','reviewDiscover']) $(id).disabled = value;
-  $('cancel').disabled = !(value && mode === 'lab');
+/* ── busy flags: the substrate process serves requests concurrently ── */
+let chatId = null, labId = null, loading = false, cancelled = false, labCancelled = false;
+function setChatBusy(on) {
   const send = $('send');
-  if (value && mode === 'chat') { send.classList.add('stop'); send.innerHTML = 'Stop'; send.disabled = false; }
-  else { send.classList.remove('stop'); send.innerHTML = 'Send <span class="mono" style="opacity:.6">↵</span>'; send.disabled = value; }
+  if (on) { send.classList.add('stop'); send.innerHTML = 'Stop'; }
+  else { send.classList.remove('stop'); send.innerHTML = 'Send <span class="mono" style="opacity:.6">↵</span>'; }
 }
+function setLabBusy(on) { $('run').disabled = on; $('cancel').disabled = !on; }
+function setLoading(on) { loading = on; $('discover').disabled = on; $('reviewDiscover').disabled = on; }
 
 /* ── model dropdowns ──────────────────── */
 function modelValue(selectId, inputId) {
@@ -44,7 +43,7 @@ for (const [s,i] of [['modelSelect','model'],['reviewModelSelect','reviewModel']
   $(s).onchange = () => { $(i).hidden = $(s).value !== CUSTOM; if (!$(i).hidden) $(i).focus(); if (s === 'modelSelect') saveModel(); };
 }
 $('model').onchange = saveModel;
-function saveModel(){ const m = modelValue('modelSelect','model'); if (m) store.set('model.'+$('provider').value, m); updateReady(); }
+function saveModel(){ const m = modelValue('modelSelect','model'); if (m) store.set('model.'+$('provider').value, m); updateReady(); loadState(); }
 
 function config(review=false) {
   return review
@@ -53,11 +52,11 @@ function config(review=false) {
 }
 
 async function discover(review=false, quiet=false) {
-  if (busy) return;
+  if (loading) return;
   const p = config(review);
   if (!p.name) { status('Choose a reviewer provider first.', 'err'); return; }
   const btn = review ? $('reviewDiscover') : $('discover');
-  lock(true); btn.classList.add('spin'); status('Loading models from '+labelOf(p.name)+'…', 'busy');
+  setLoading(true); btn.classList.add('spin'); status('Loading models from '+labelOf(p.name)+'…', 'busy');
   try {
     const models = await window.lab.request({action:'models', provider:p});
     const keep = review ? p.model : (p.model || store.get('model.'+p.name));
@@ -67,7 +66,7 @@ async function discover(review=false, quiet=false) {
   } catch (e) {
     fillModels(review ? 'reviewModelSelect' : 'modelSelect', review ? 'reviewModel' : 'model', [], p.model);
     status(quiet && /key required/i.test(e.message) ? 'Enter a '+labelOf(p.name)+' key, then refresh models.' : clean(e.message), 'err');
-  } finally { lock(false); btn.classList.remove('spin'); }
+  } finally { setLoading(false); btn.classList.remove('spin'); }
 }
 const labelOf = v => (PROVIDERS.find(p => p[0] === v) || [,v])[1];
 const clean = m => String(m).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -75,7 +74,11 @@ $('discover').onclick = () => discover(false);
 $('reviewDiscover').onclick = () => discover(true);
 $('provider').onchange = () => { store.set('provider', $('provider').value); $('key').value=''; discover(false, true); };
 $('key').addEventListener('keydown', e => { if (e.key === 'Enter') discover(false); });
-function updateReady(){ const m = modelValue('modelSelect','model'); if (!busy && m) status(labelOf($('provider').value)+' · '+m, 'ok'); }
+function updateReady(){ const m = modelValue('modelSelect','model'); if (!chatId && !labId && m) status(labelOf($('provider').value)+' · '+m, 'ok'); }
+async function loadState() {
+  const p = config(); if (!p.model) return;
+  try { gauges(await window.lab.request({action:'state', provider:{name:p.name, model:p.model}}), p.model); } catch {}
+}
 
 /* ── tabs ─────────────────────────────── */
 for (const tab of document.querySelectorAll('nav button')) tab.onclick = () => {
@@ -128,8 +131,21 @@ function addMessage(role, text, meta='') {
   return row;
 }
 
+function renderChecks(checks, col) {
+  if (!checks || !checks.length) return;
+  const box = el('div', 'checks', null, col);
+  el('div', 'label', 'Independent checks · computed in Python', box);
+  for (const c of checks) {
+    const chip = el('div', 'check ' + c.verdict, null, box);
+    el('b', '', c.verdict === 'supported' ? '✓' : '✗', chip);
+    el('span', '', c.claim, chip);
+    el('em', '', c.detail, chip);
+    chip.title = c.kind;
+  }
+}
+
 async function send() {
-  if (busy) { if (!$('send').disabled) { cancelled = true; window.lab.cancel(); } return; }
+  if (chatId) { cancelled = true; window.lab.cancel(chatId); return; }
   const text = $('prompt').value.trim();
   if (!text) return;
   const p = config();
@@ -137,32 +153,47 @@ async function send() {
   history.push({role:'user', content:text});
   addMessage('user', text);
   $('prompt').value = ''; grow();
-  const typing = addMessage('assistant', '');
-  typing.querySelector('.body').innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
-  cancelled = false; lock(true, 'chat'); status('Thinking · ' + p.model, 'busy');
+  const row = addMessage('assistant', '');
+  const body = row.querySelector('.body');
+  body.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+  cancelled = false;
+  const id = await window.lab.newId(); chatId = id; setChatBusy(true);
+  status('Streaming · ' + p.model, 'busy');
   if ($('protocol').checked) scanPipeline(true);
+  let streamed = '', first = true;
+  const off = window.lab.onDelta(m => {
+    if (m.id !== id) return;
+    if (first) { body.textContent = ''; first = false; }
+    streamed += m.delta; body.textContent = streamed;
+    const log = $('log'); if (log.scrollHeight - log.scrollTop - log.clientHeight < 160) log.scrollTop = log.scrollHeight;
+  });
   try {
-    const r = await window.lab.request({action:'chat', provider:p, messages:history, protocol:$('protocol').checked});
-    typing.remove();
-    history.push({role:'assistant', content:r.text});
+    const r = await window.lab.request({action:'chat', stream:true, provider:p, messages:history, protocol:$('protocol').checked}, id);
+    const reply = r.text || streamed;
+    if (!reply.trim()) throw Error(r.cancelled ? 'Stopped before any text arrived.' : 'Empty reply');
+    history.push({role:'assistant', content:reply});
+    body.replaceChildren(); renderBody(reply, body);
     const u = r.usage || {};
     const tokens = (u.output_tokens ?? u.completion_tokens ?? u.eval_count);
-    addMessage('assistant', r.text, r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : ''));
-    $('usage').textContent = history.length/2 + ' turns';
+    el('em', '', r.model + ' · ' + r.seconds.toFixed(1) + 's' + (tokens != null ? ' · ' + tokens + ' tok' : '') + (r.cancelled ? ' · stopped' : ''), row.querySelector('.who'));
+    renderChecks(r.checks, body.parentElement);
+    if (r.state) gauges(r.state, r.model);
+    $('usage').textContent = Math.floor(history.length / 2) + ' turns' + (r.checks && r.checks.length ? ' · ' + r.checks.length + ' claims checked' : '');
     status(labelOf(p.name) + ' · ' + p.model, 'ok');
-    if ($('protocol').checked) lightPipeline(['decompose','attack','verify','conclude'].filter(ph => new RegExp(ph, 'i').test(r.text)));
+    const phases = ['decompose','attack','verify','conclude'].filter(ph => new RegExp('\\b' + ph, 'i').test(reply));
+    if ($('protocol').checked || phases.length >= 3) lightPipeline(phases);
   } catch (e) {
-    typing.remove(); history.pop();
-    $('thread').lastChild?.remove();
-    $('prompt').value = text; grow();
+    history.pop(); row.remove();
+    if (!streamed) { $('thread').lastChild?.remove(); $('prompt').value = text; grow(); }
+    else { history.push({role:'user', content:text}, {role:'assistant', content:streamed}); addMessage('assistant', streamed, 'partial'); }
     if (cancelled) status('Stopped.', ''); else { addMessage('error', clean(e.message)); status(clean(e.message), 'err'); }
-  } finally { lock(false); scanPipeline(false); $('prompt').focus(); }
+  } finally { off(); chatId = null; setChatBusy(false); scanPipeline(false); $('prompt').focus(); }
 }
 $('send').onclick = send;
 $('prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 function grow(){ const t = $('prompt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 240) + 'px'; }
 $('prompt').addEventListener('input', grow);
-$('clear').onclick = () => { if (busy) return; history = []; $('thread').replaceChildren(); $('usage').textContent=''; lightPipeline([]); $('prompt').focus(); };
+$('clear').onclick = () => { if (chatId) return; history = []; $('thread').replaceChildren(); $('usage').textContent=''; lightPipeline([]); $('prompt').focus(); };
 for (const chip of document.querySelectorAll('.chip')) chip.onclick = () => { $('prompt').value = chip.textContent; grow(); $('prompt').focus(); };
 
 /* ── protocol rail ────────────────────── */
@@ -170,8 +201,9 @@ function scanPipeline(on) { for (const ph of document.querySelectorAll('.phase')
 function lightPipeline(names) {
   document.querySelectorAll('.phase').forEach((ph, i) => setTimeout(() => ph.classList.toggle('on', names.includes(ph.dataset.phase)), i * 140));
 }
-function gauges(state) {
+function gauges(state, model) {
   const box = $('gauges'); box.replaceChildren();
+  if (model) el('div', 'muted mono', model, box).style.fontSize = '11px';
   for (const [name, value] of Object.entries(state)) {
     if (typeof value !== 'number') continue;
     const g = el('div', 'gauge', null, box);
@@ -183,7 +215,7 @@ function gauges(state) {
 
 /* ── experiment ───────────────────────── */
 $('mode').onchange = () => { $('letters').hidden = $('mode').value !== 'letters'; $('research').hidden = !$('letters').hidden; };
-$('cancel').onclick = () => { cancelled = true; window.lab.cancel(); };
+$('cancel').onclick = () => { if (labId) { labCancelled = true; window.lab.cancel(labId); } };
 
 function renderRun(x) {
   const r = x.result, card = el('div', 'result', null, $('results'));
@@ -211,8 +243,8 @@ function renderRun(x) {
 }
 
 $('run').onclick = async () => {
-  if (busy) return;
-  cancelled = false; lock(true, 'lab'); $('results').replaceChildren(); scanPipeline(true);
+  if (labId) return;
+  labCancelled = false; setLabBusy(true); $('results').replaceChildren(); scanPipeline(true);
   try {
     const p = config(), r = config(true), condition = $('condition').value;
     if (!p.model) throw Error('Choose a proposer model in the top bar');
@@ -220,14 +252,15 @@ $('run').onclick = async () => {
     const req = {action:'run', provider:p, reviewer:r.name ? r : null, mode:$('mode').value, task:$('task').value,
       word:$('word').value, letter:$('letter').value, budget:Number($('budget').value), fresh:condition === 'compare'};
     for (const adaptive of condition === 'compare' ? [false, true] : [condition === 'adaptive']) {
-      if (cancelled) break;
+      if (labCancelled) break;
       status('Running ' + (adaptive ? 'adaptive' : 'fixed') + ' condition…', 'busy');
-      renderRun(await window.lab.request({...req, adaptive}));
+      labId = await window.lab.newId();
+      renderRun(await window.lab.request({...req, adaptive}, labId));
     }
     lightPipeline(['decompose','attack','verify','conclude']);
-    status(cancelled ? 'Cancelled.' : 'Experiment finished. Open research results are not proof.', cancelled ? '' : 'ok');
-  } catch (e) { status(cancelled ? 'Cancelled.' : clean(e.message), cancelled ? '' : 'err'); }
-  finally { lock(false); scanPipeline(false); }
+    status(labCancelled ? 'Cancelled.' : 'Experiment finished. Open research results are not proof.', labCancelled ? '' : 'ok');
+  } catch (e) { status(labCancelled ? 'Cancelled.' : clean(e.message), labCancelled ? '' : 'err'); }
+  finally { labId = null; setLabBusy(false); scanPipeline(false); }
 };
 
 /* ── boot ─────────────────────────────── */

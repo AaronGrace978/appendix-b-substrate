@@ -119,6 +119,12 @@ from the provider's live catalog, and optionally switch on **Protocol** so repli
 follow decompose → attack → verify → conclude. The interface was redesigned around
 the substrate itself: a protocol rail, live state gauges and verdict-coded results.
 
+v0.6 streams replies from one long-running substrate process and **checks claims in
+chat independently**: arithmetic, primality and letter counts in a reply are recomputed
+by `chat_checks.py` and shown as ✓ / ✗ under the message. Each checked claim updates that
+model's persistent substrate state, so chat drives the same dynamics as experiments.
+Unrecognised claims are simply not checked; no check is not support.
+
 See [desktop setup and Windows release instructions](desktop/README.md).
 The experimental desktop lab supports OpenAI, Anthropic, OpenRouter, Ollama
 Cloud and Ollama Local. The Windows release pipeline packages a portable
