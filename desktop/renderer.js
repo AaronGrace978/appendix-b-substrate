@@ -106,6 +106,41 @@ $('protocol').onchange = () => store.set('protocol', $('protocol').checked ? '1'
 
 function el(tag, cls, text, parent) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; if (parent) parent.append(e); return e; }
 
+/* ── light LaTeX → Unicode, for models that ignore the "no LaTeX" instruction ── */
+const MATH_MARK = '⁣';
+const TEX_SYM = {mapsto:'↦', to:'→', rightarrow:'→', Rightarrow:'⇒', leftarrow:'←', iff:'⇔', implies:'⇒', le:'≤', leq:'≤', ge:'≥', geq:'≥',
+  neq:'≠', ne:'≠', times:'×', cdot:'·', cdots:'⋯', ldots:'…', dots:'…', infty:'∞', pm:'±', approx:'≈', equiv:'≡', in:'∈', notin:'∉',
+  subset:'⊂', subseteq:'⊆', cup:'∪', cap:'∩', forall:'∀', exists:'∃', sum:'Σ', prod:'Π', mid:'|', lfloor:'⌊', rfloor:'⌋', lceil:'⌈',
+  rceil:'⌉', alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ε', theta:'θ', lambda:'λ', mu:'μ', pi:'π', sigma:'σ', phi:'φ',
+  omega:'ω', Delta:'Δ', Sigma:'Σ', Omega:'Ω', bmod:'mod', log:'log', ln:'ln', max:'max', min:'min', gcd:'gcd', lim:'lim', sin:'sin', cos:'cos'};
+const SUP = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','+':'⁺','-':'⁻','n':'ⁿ','(':'⁽',')':'⁾'};
+function texToText(t) {
+  let s = t;
+  s = s.replace(/\\begin\{cases\}([\s\S]*?)\\end\{cases\}/g, (_, body) => body.split(/\\\\(?:\[[^\]]*\])?/).map(r => r.trim()).filter(Boolean)
+    .map(r => { const [a, b] = r.split('&'); return (a || '').replace(/,\s*$/, '').trim() + (b ? ' if ' + b.trim().replace(/[,.]\s*$/, '') : ''); }).join(';  '));
+  s = s.replace(/\\\\(?:\[[^\]]*\])?/g, ' ');
+  s = s.replace(/\{,\}/g, ',').replace(/\\[,;!:]/g, ' ').replace(/\\q?quad/g, '  ');
+  for (let i = 0; i < 3; i++) {
+    s = s.replace(/\\(?:boxed)\{([^{}]*)\}/g, '**$1**')
+         .replace(/\\(?:text|mathrm|mathbf|mathit|operatorname|textbf|mathbb)\{([^{}]*)\}/g, '$1')
+         .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, '($1)/($2)')
+         .replace(/\\sqrt\{([^{}]*)\}/g, '√($1)')
+         .replace(/\\pmod\{([^{}]*)\}/g, '(mod $1)');
+  }
+  s = s.replace(/\^\{([0-9+\-n()]+)\}|\^([0-9n])/g, (m, a, b) => [...(a || b)].map(c => SUP[c] || c).join(''));
+  s = s.replace(/\^\{([^{}]*)\}/g, '^($1)').replace(/_\{([^{}]*)\}/g, '_$1');
+  s = s.replace(/\\left|\\right|\\big|\\Big|\\displaystyle/g, '');
+  s = s.replace(/\\([A-Za-z]+)/g, (m, w) => TEX_SYM[w] ?? w);
+  s = s.replace(/\\([{}%$#&_])/g, '$1').replace(/[{}]/g, '');
+  return s.replace(/[ \t]{3,}/g, '  ').trim();
+}
+function cleanTex(text) {
+  // Leave fenced code alone; convert display and inline math elsewhere.
+  return String(text).split(/(```[\s\S]*?(?:```|$))/).map((part, i) => i % 2 ? part : part
+    .replace(/\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$/g, (_, a, b) => '\n' + MATH_MARK + texToText(a ?? b).replace(/\n+/g, ' ') + '\n')
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_, a) => texToText(a))).join('');
+}
+
 const PHASE_NUM = {DECOMPOSE:'01', ATTACK:'02', VERIFY:'03', CONCLUDE:'04'};
 function phaseOf(line) {
   const m = line.match(/^\s*(?:#{1,4}\s*)?\**\s*([A-Za-z]+)\s*\**\s*:?\s*\**\s*(.*)$/);
@@ -127,9 +162,9 @@ function inline(text, target) {
   }
 }
 
-function renderBody(text, target) {
+function renderBody(text, target, seen) {
   target.replaceChildren(); target.classList.remove('streaming');
-  const lines = String(text).replace(/\r/g, '').split('\n');
+  const lines = cleanTex(String(text).replace(/\r/g, '')).split('\n');
   let box = target, para = [], list = null, listKind = '';
   const flush = () => {
     if (para.length) { const p = el('p', '', null, box); para.forEach((l, i) => { if (i) p.append(el('br')); inline(l, p); }); para = []; }
@@ -151,10 +186,12 @@ function renderBody(text, target) {
       box = el('section', 'sec', null, target);
       box.style.setProperty('--c', PHASE_COLORS[ph.key]);
       const h = el('div', 'sec-h', null, box); el('i', '', PHASE_NUM[ph.key], h); h.append(ph.key);
+      if (seen) { if (seen.has(ph.key)) el('small', 'cont', 'continued', h); seen.add(ph.key); }
       if (ph.rest) para.push(ph.rest);
       continue;
     }
     if (!line.trim()) { flush(); endList(); continue; }
+    if (line.startsWith(MATH_MARK)) { flush(); endList(); inline(line.slice(1), el('div', 'math', null, box)); continue; }
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); endList(); el('hr', '', null, box); continue; }
     const hd = line.match(/^\s*#{1,4}\s+(.*)$/);
     if (hd) { flush(); endList(); inline(hd[1].replace(/\*\*/g, ''), el('h3', '', null, box)); continue; }
@@ -299,10 +336,11 @@ async function send() {
     row.dataset.raw = reply;
     // Rebuild the reply from its segments: text, code runs, notices.
     for (const old of col.querySelectorAll(':scope > .body, :scope > .run')) old.remove();
+    const seenPhases = new Set();
     for (const s of (r.segments && r.segments.length ? r.segments : [{type:'text', text:reply}])) {
       if (s.type === 'run') col.append(runCard(s));
       else if (s.type === 'notice') el('p', 'notice', s.text, el('div', 'body', null, col));
-      else { const prose = proseOf(s.text); if (prose) renderBody(prose, el('div', 'body', null, col)); }
+      else { const prose = proseOf(s.text); if (prose) renderBody(prose, el('div', 'body', null, col), seenPhases); }
     }
     body = col.querySelector(':scope > .body') || el('div', 'body', null, col);
     const u = r.usage || {};

@@ -58,7 +58,7 @@ def is_prime(n: int) -> bool:
 
 
 def _check(kind, claim, ok, detail):
-    return {"kind": kind, "claim": claim.strip().strip("\"'“”‘’`"), "verdict": "supported" if ok else "refuted", "detail": detail}
+    return {"kind": kind, "claim": claim.strip().strip("\"'“”‘’`.,;:"), "verdict": "supported" if ok else "refuted", "detail": detail}
 
 
 def arithmetic(text):
@@ -131,14 +131,23 @@ def collatz_steps(n: int, limit: int = 100000) -> int | None:
     return steps if n == 1 else None
 
 
+def normalize_math(text: str) -> str:
+    """Undo common LaTeX so claims written in TeX can still be checked."""
+    t = text.replace("{,}", "").replace("\\,", "").replace("\\!", "")
+    t = re.sub(r"\\(?:text|mathrm|mathbf|boxed|operatorname)\s*\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\[()\[\]]|\\q?quad|\$\$?", " ", t)
+    return t
+
+
 def collatz(text):
     """Check 'n takes k steps' claims when the text is about Collatz sequences."""
     if "collatz" not in text.lower() and "3n+1" not in text.replace(" ", "").lower():
         return []
     out, seen = [], set()
-    pat = (r"\b(?:n\s*=\s*)?(\d{1,9})\b[^.\n]{0,40}?\b(?:takes|requires|needs|has|reaches 1 in|in)\s+"
-           r"(?:exactly\s+|only\s+)?(\d{1,5})\s+(?:total\s+)?steps")
-    for m in re.finditer(pat, text.replace(",", ""), re.I):
+    t = re.sub(r"(?<=\d),(?=\d{3}\b)", "", normalize_math(text))
+    pat = (r"\b(?:n\s*=\s*)?(\d{1,9})\b[^.\n\d]{0,45}?\b(?:takes|requires|needs|has|reaches 1 in|with|"
+           r"stopping time (?:is|of)|is exactly)\s+(?:exactly\s+|only\s+)?(\d{1,5})\s+(?:total\s+)?steps")
+    for m in re.finditer(pat, t, re.I):
         n, k = int(m.group(1)), int(m.group(2))
         if n < 1 or (n, k) in seen:
             continue

@@ -154,7 +154,13 @@ jobs:
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Host 'Release already exists; keeping existing assets.'; exit 0 }
           $notes = @"
-          ## Appendix B v$($env:APP_VERSION) — Models can run code
+          ## Appendix B v$($env:APP_VERSION) — Models that check their work
+
+          **New in 0.7.2**
+          - **One protocol pass.** With Protocol and Code both on, the model runs code during VERIFY and continues from there, instead of restarting at DECOMPOSE after the results. Repeated phases are labelled *continued*.
+          - **Readable maths.** Models are asked for plain-text maths; LaTeX that slips through (\[ \], \( \), cases, \boxed, \frac, superscripts, arrows) is rendered as clean Unicode.
+          - **Smarter checks.** Collatz claims written in LaTeX (10{,}971 … 267 steps) are now checked, and nearby numbers are no longer mistaken for the claim.
+          - **New README** with real screenshots, runnable examples (`examples/`) and tests that keep them honest.
 
           **New in 0.7.1: code running that models actually use**
           - Code now runs through each provider's built-in **tool calling** (Ollama, OpenRouter, Anthropic, OpenAI). Models like Kimi were trained to call tools this way and ignored the old text convention: they said "I'll compute it" and stopped. Models that don't support tools fall back automatically to code blocks.

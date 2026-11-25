@@ -146,5 +146,5 @@ def result_message(results: list[dict]) -> str:
         parts.append(body)
     return ("Results from running your code (computed by the app, not written by the user):\n\n"
             + "\n\n".join(parts)
-            + "\n\nContinue. Use these results; run more code only if you need it. "
-              "Finish with your final answer.")
+            + "\n\nContinue from where you stopped; do not repeat sections you already wrote. "
+              "Use these results, run more code only if you need it, and finish with your final answer.")

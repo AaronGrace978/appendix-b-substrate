@@ -382,9 +382,17 @@ def letter_verifier(word, letter):
 
 SUBSTRATE_PROMPT = (
     "Work under the Appendix B protocol: decompose -> skeptical attack -> independent verification -> conclusion. "
-    "Structure every substantive answer with the headings DECOMPOSE, ATTACK, VERIFY and CONCLUDE. "
-    "Under ATTACK, try at least two ways your first idea could be wrong. Under VERIFY, state concrete checks "
-    "the user can run and say plainly which claims remain unverified. Never present unverified claims as proven."
+    "Structure every substantive answer with the headings DECOMPOSE, ATTACK, VERIFY and CONCLUDE, each used once "
+    "per reply. Under ATTACK, try at least two ways your first idea could be wrong. Under VERIFY, state concrete "
+    "checks and say plainly which claims remain unverified. Never present unverified claims as proven."
+)
+PROTOCOL_WITH_CODE = (
+    "When you can run code, run it during VERIFY. After results come back, continue from where you stopped: "
+    "do not repeat or restart earlier headings."
+)
+FORMAT_PROMPT = (
+    "Write maths in plain text with Unicode symbols (×, ÷, ≤, ≥, →, ↦, ², √, π), not LaTeX: the app does not "
+    "render LaTeX. Write numbers without LaTeX grouping, e.g. 10,971."
 )
 
 
@@ -425,7 +433,9 @@ def chat(req, directory=None, on_delta=None, cancelled=lambda: False, on_thinkin
     if not isinstance(system, str) or len(system) > 20000:
         raise ValueError("system prompt must be text under 20000 characters")
     if req.get("protocol"):
-        system = (SUBSTRATE_PROMPT + "\n\n" + system).strip()
+        extra = ("\n" + PROTOCOL_WITH_CODE) if req.get("code") else ""
+        system = (SUBSTRATE_PROMPT + extra + "\n\n" + system).strip()
+    system = (FORMAT_PROMPT + "\n\n" + system).strip()
     tools = bool(req.get("code"))
     native = tools and req.get("native_tools", True)
     base_system = system
