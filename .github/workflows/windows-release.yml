@@ -1,0 +1,109 @@
+name: Windows preview release
+
+on:
+  push:
+    branches: [v0.4-desktop-lab]
+    paths: ['.github/workflows/windows-release.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appendix-b-windows-preview
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    if: github.ref == 'refs/heads/v0.4-desktop-lab'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          architecture: x64
+      - name: Python regression tests
+        run: python -m unittest discover -v
+      - name: Install pinned Electron and check desktop scripts
+        working-directory: desktop
+        run: |
+          npm install --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check
+      - name: Assemble portable Windows application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'Appendix-B'
+          Copy-Item -LiteralPath 'desktop/node_modules/electron/dist' -Destination $stage -Recurse
+          Rename-Item -LiteralPath (Join-Path $stage 'electron.exe') -NewName 'Appendix B.exe'
+          $appDir = Join-Path $stage 'resources/app'
+          $desktop = Join-Path $appDir 'desktop'
+          New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+          foreach ($file in @('main.cjs','preload.cjs','index.html','renderer.js','README.md')) {
+            Copy-Item -LiteralPath "desktop/$file" -Destination $desktop
+          }
+          foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','README.md')) {
+            Copy-Item -LiteralPath $file -Destination $appDir
+          }
+          @{name='appendix-b-desktop-lab'; productName='Appendix B'; version='0.4.0'; main='desktop/main.cjs'} | ConvertTo-Json | Set-Content (Join-Path $appDir 'package.json') -Encoding utf8
+          $pyHome = (python -c "import sys; print(sys.base_prefix)").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pythonDir = Join-Path $stage 'resources/python'
+          Copy-Item -LiteralPath $pyHome -Destination $pythonDir -Recurse
+          & (Join-Path $pythonDir 'python.exe') -c "import sqlite3, ssl, sys; assert sys.version_info >= (3,10)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'desktop/README.md' -Destination (Join-Path $stage 'README.txt')
+          "APPENDIX_STAGE=$stage" >> $env:GITHUB_ENV
+      - name: Packaged desktop launch smoke test
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:APPENDIX_STAGE 'Appendix B.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'Desktop smoke test timed out' }
+          if ($p.ExitCode -ne 0) { throw "Desktop smoke test exit code $($p.ExitCode)" }
+      - name: Create ZIP and checksum
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $zip = Join-Path $out 'Appendix-B-v0.4.0-win-x64.zip'
+          Compress-Archive -Path $env:APPENDIX_STAGE -DestinationPath $zip -CompressionLevel Optimal
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          "$sha  Appendix-B-v0.4.0-win-x64.zip" | Set-Content (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          "APPENDIX_ASSETS=$out" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Appendix-B-Windows-x64
+          path: ${{ runner.temp }}/release-assets/*
+      - name: Publish Windows prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'v0.4.0-windows-preview'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; refusing to overwrite.' }
+          $notes = @'
+          Experimental Windows x64 portable build of Appendix B Cognitive Research Lab.
+          
+          With credit to [DinoClaw](https://github.com/AaronGrace978/DinoClaw).
+          
+          Extract the ZIP, open the Appendix-B folder, and launch Appendix B.exe.
+          Includes Electron 45.5.0 and Python. No separate Python or Node install required.
+          Unsigned preview; Windows SmartScreen may warn.
+          
+          Supports OpenAI, Anthropic, OpenRouter, Ollama Cloud and Ollama Local.
+          Live provider calls require your own credentials where applicable.
+          This is research software; model critique is not mathematical proof.
+          '@
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          $notes | Set-Content $notesFile -Encoding utf8
+          gh release create $tag (Join-Path $env:APPENDIX_ASSETS 'Appendix-B-v0.4.0-win-x64.zip') (Join-Path $env:APPENDIX_ASSETS 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Appendix B v0.4.0 — Windows Preview' --notes-file $notesFile --prerelease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
