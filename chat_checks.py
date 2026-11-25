@@ -70,19 +70,28 @@ def arithmetic(text):
         if "=" not in raw or any(op in raw for op in ("==", "!=", "<=", ">=")):
             continue
         sides = [s.strip(" .,;:") for s in raw.split("=")]
-        if len(sides) < 2 or any(not re.fullmatch(_EXPR, s) or not re.search(r"\d", s) for s in sides):
+        # Keep the sides Python can evaluate: "f(71) = 71² − 61 × 71 + 971 = 1681" still checks the
+        # arithmetic even though "f(71)" is not a number. Dropping a side keeps the chain's claim
+        # (every remaining side equal), so this never invents a claim the text did not make.
+        kept = []
+        for side in sides:
+            if not re.fullmatch(_EXPR, side) or not re.search(r"\d", side):
+                continue
+            try:
+                kept.append((side, evaluate(side)))
+            except (ValueError, SyntaxError, ZeroDivisionError, OverflowError, TypeError):
+                continue
+        if len(kept) < 2:
             continue
         # A bare "x = 5"-style line has no operator on either side: nothing to check.
-        if not any(re.search(r"[+\-*/%²³×·÷^]", s.strip().lstrip("-")) for s in sides):
+        if not any(re.search(r"[+\-*/%²³×·÷^−–]", side.strip().lstrip("-−")) for side, _ in kept):
             continue
+        raw = " = ".join(side.strip() for side, _ in kept)
         key = re.sub(r"\s+", "", raw)
         if key in seen:
             continue
         seen.add(key)
-        try:
-            values = [evaluate(s) for s in sides]
-        except (ValueError, SyntaxError, ZeroDivisionError, OverflowError):
-            continue
+        values = [v for _, v in kept]
         ok = all(_same(values[0], v) for v in values[1:])
         shown = " = ".join(f"{v:g}" if isinstance(v, float) else str(v) for v in values)
         out.append(_check("arithmetic", raw, ok, "Python evaluates: " + shown))

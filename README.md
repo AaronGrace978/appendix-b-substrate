@@ -103,6 +103,25 @@ r = run_code("open('/etc/hosts').read()")    # outside the temp folder
 print(r["stderr"].strip().splitlines()[-1])  # PermissionError: blocked by the Appendix B code runner
 ```
 
+### A real session: the model catches its own bug
+
+Kimi k3.1 Pro on Ollama Cloud, with Protocol and Code on, was asked:
+
+> Among all polynomials n² + an + b with |a| < 1000 and |b| ≤ 1000, find the one that gives the longest run of primes for consecutive n starting at n = 0. Report a, b, the run length and a × b, attack your answer, and verify everything with code.
+
+It named a candidate in DECOMPOSE (a = −61, b = 971) and called it "only a hypothesis until the exhaustive search". In ATTACK it ruled out the famous 80-term n² − 79n + 1601 (b is out of bounds) and proved every run must break by n = b, so a bounded search can't miss a longer one. Then VERIFY took four code runs in 105 seconds:
+
+| Run | Result | What the model did |
+|---|---|---|
+| 1 | ✓ | Searched all 335,832 pairs with prime b: unique winner (−61, 971), 71 primes, broken by 1681 = 41 × 41 |
+| 2 | ✗ | A second, independent search using a Miller–Rabin test disagreed and crashed. The model kept the answer **unconfirmed**: "The second checker disagreed, so it has not verified the result." |
+| 3 | ✓ | Diagnosed its own bug: the Miller–Rabin wrapper tested the prime 61 against base 61 instead of skipping it |
+| 4 | ✓ | Fixed it, cross-checked Miller–Rabin against trial division for 0–10,000, and reran: both searches agree on the same unique winner |
+
+Its conclusion: **n² − 61n + 971**, 71 primes for n = 0…70, a × b = −59,231, and the winner is exactly Euler's polynomial shifted, E(n − 31) where E(m) = m² + m + 41. We confirmed each claim independently (second place is n² − 59n + 911 with 70 primes).
+
+That is the protocol working as designed: a failed verification sent the model back to attack its own checker instead of explaining the disagreement away.
+
 ## Use the substrate in Python
 
 Zero dependencies, Python 3.10+. A proposer stands in for the model and a verifier computes the truth. Here the first guess is wrong, gets refuted, and the corrected guess is verified ([`examples/substrate_quickstart.py`](examples/substrate_quickstart.py)):
@@ -157,18 +176,23 @@ surprise after the refuted guess: 0.23
 ```python
 from chat_checks import extract_checks
 
-reply = "In the Collatz sequence 10,971 takes 267 steps. Also 91 is prime and 7 * 8 = 56."
+reply = """In the Collatz sequence 10,971 takes 267 steps. Also 91 is prime and 7 * 8 = 56.
+The run breaks at f(71) = 71² − 61 × 71 + 971 = 1681 = 41 × 41."""
+
 for c in extract_checks(reply):
     print("✓" if c["verdict"] == "supported" else "✗", c["claim"], "—", c["detail"])
 ```
 
 ```text
 ✓ 7 * 8 = 56 — Python evaluates: 56 = 56
+✓ 71² − 61 × 71 + 971 = 1681 = 41 × 41 — Python evaluates: 1681 = 1681 = 1681
 ✗ 91 is prime — 91 = 7 × 13
 ✓ 10971 takes 267 steps — Python counts 267 steps from 10971 to 1
 ```
 
-Claims the checker doesn't recognise are simply not checked; no check is not support. Code blocks are evidence, not claims, and are skipped.
+Runnable as [`examples/check_claims.py`](examples/check_claims.py).
+
+Claims the checker doesn't recognise are simply not checked; no check is not support. Code blocks are evidence, not claims, and are skipped. Parts of an equation Python can't evaluate, like `f(71)`, are set aside and the rest of the chain is still checked.
 
 ## Architecture
 

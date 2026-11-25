@@ -46,6 +46,30 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([c.strip() for c in find_runs(text)], ["print(1)", "print(3)"])
 
 
+class ChainAndTracebackTests(unittest.TestCase):
+    def test_function_notation_does_not_hide_the_arithmetic(self):
+        checks = extract_checks("f(71) = 71² − 61 × 71 + 971 = 1681 = 41 × 41. Also f(2) = 2² + 3 = 8.")
+        got = {(c["claim"], c["verdict"]) for c in checks}
+        self.assertIn(("71² − 61 × 71 + 971 = 1681 = 41 × 41", "supported"), got)
+        self.assertIn(("2² + 3 = 8", "refuted"), got)
+        self.assertEqual(extract_checks("Set x = 5 and 3 = 3."), [])
+
+    def test_windows_traceback_hides_guard_frame(self):
+        from code_runner import clean_traceback
+        win = ('Traceback (most recent call last):\r\n'
+               '  File "C:\\Users\\me\\AppData\\Local\\Temp\\appendixb-run-x\\guard.py", line 65, in <module>\r\n'
+               '    exec(compile(__code, "snippet.py", "exec"), {})\r\n'
+               '    ~~~~^^^^^^^^^^^^\r\n'
+               '  File "snippet.py", line 2, in <module>\r\n'
+               '    print(x[5])\r\n'
+               'IndexError: list index out of range\r\n')
+        out = clean_traceback(win)
+        self.assertNotIn("guard.py", out)
+        self.assertNotIn("\r", out)
+        self.assertIn('File "snippet.py", line 2', out)
+        self.assertNotIn("guard.py", run_code("x = [1]\nprint(x[5])", timeout=5)["stderr"])
+
+
 class CollatzCheckTests(unittest.TestCase):
     def test_collatz_claims(self):
         got = {(c["claim"], c["verdict"]) for c in extract_checks(

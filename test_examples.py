@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import unittest
@@ -8,6 +9,7 @@ HERE = Path(__file__).parent
 
 def run(name):
     return subprocess.run([sys.executable, str(HERE / "examples" / name)], capture_output=True, text=True,
+                          encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                           timeout=120, check=True).stdout
 
 
@@ -25,6 +27,14 @@ class ExampleTests(unittest.TestCase):
         self.assertIn("FIRST_QUALIFYING 10971 STEPS 267 PEAK 975400", out)
         self.assertIn("MAX_BELOW_CANDIDATE_(steps,n): (254, 10617)", out)
         self.assertIn("ALL_TRANSITIONS_VALID: True", out)
+
+
+class ClaimExampleTests(unittest.TestCase):
+    def test_check_claims(self):
+        out = run("check_claims.py")
+        self.assertIn("✓ 71² − 61 × 71 + 971 = 1681 = 41 × 41", out)
+        self.assertIn("✗ 91 is prime — 91 = 7 × 13", out)
+        self.assertIn("✓ 10971 takes 267 steps", out)
 
 
 if __name__ == "__main__":

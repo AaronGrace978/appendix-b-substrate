@@ -106,6 +106,15 @@ def _cap(s: str) -> str:
     return s if len(s) <= OUTPUT_CAP else s[:OUTPUT_CAP] + f"\n… [truncated {len(s) - OUTPUT_CAP} characters]"
 
 
+def clean_traceback(text: str) -> str:
+    """Drop the runner's own guard.py frame (and its source/caret lines) from tracebacks.
+
+    Windows writes CRLF line endings, so normalise them first.
+    """
+    text = text.replace("\r\n", "\n")
+    return re.sub(r'  File "[^"\n]*guard\.py", line \d+, in <module>\n(?:    .*\n)*', "", text)
+
+
 def run_code(code: str, timeout: float = TIMEOUT, python: str | None = None) -> dict:
     """Run code in a restricted child process and return its outcome."""
     if not isinstance(code, str) or not code.strip():
@@ -127,10 +136,8 @@ def run_code(code: str, timeout: float = TIMEOUT, python: str | None = None) -> 
             timed_out = False
         except subprocess.TimeoutExpired as exc:
             out, err, code_, timed_out = exc.stdout or b"", exc.stderr or b"", None, True
-    stdout = _cap(out.decode("utf-8", "replace"))
-    stderr = _cap(err.decode("utf-8", "replace"))
-    # Hide guard frames from tracebacks so the model sees its own line numbers.
-    stderr = re.sub(r'  File "[^"]*guard\.py", line \d+, in <module>\n(?:    .*\n)?', "", stderr)
+    stdout = _cap(out.decode("utf-8", "replace").replace("\r\n", "\n"))
+    stderr = _cap(clean_traceback(err.decode("utf-8", "replace")))
     return {"code": code, "stdout": stdout, "stderr": stderr, "exit": code_, "timed_out": timed_out,
             "ok": code_ == 0 and not timed_out, "seconds": round(time.monotonic() - start, 3)}
 

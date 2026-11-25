@@ -156,6 +156,11 @@ jobs:
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Models that check their work
 
+          **New in 0.7.3**
+          - **Checks see through function notation.** A line like `f(71) = 71² − 61 × 71 + 971 = 1681` is now checked: parts Python can't evaluate are set aside and the rest of the equation is still verified.
+          - **Cleaner tracebacks on Windows.** When the model's code fails, it now sees only its own code in the error, not the runner's internal guard lines (Windows CRLF line endings broke the filter).
+          - README: a real session where the model caught and fixed a bug in its own checker, plus a runnable claim-check example.
+
           **New in 0.7.2**
           - **One protocol pass.** With Protocol and Code both on, the model runs code during VERIFY and continues from there, instead of restarting at DECOMPOSE after the results. Repeated phases are labelled *continued*.
           - **Readable maths.** Models are asked for plain-text maths; LaTeX that slips through (\[ \], \( \), cases, \boxed, \frac, superscripts, arrows) is rendered as clean Unicode.
