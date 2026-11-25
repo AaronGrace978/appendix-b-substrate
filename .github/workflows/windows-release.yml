@@ -57,7 +57,7 @@ jobs:
           foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','README.md')) {
             Copy-Item -LiteralPath $file -Destination $appDir
           }
-          @{name='appendix-b-desktop-lab'; productName='Appendix B'; version='0.4.1'; main='desktop/main.cjs'} | ConvertTo-Json | Set-Content (Join-Path $appDir 'package.json') -Encoding utf8
+          @{name='appendix-b-desktop-lab'; productName='Appendix B'; version='0.4.2'; main='desktop/main.cjs'} | ConvertTo-Json | Set-Content (Join-Path $appDir 'package.json') -Encoding utf8
           $pyHome = (python -c "import sys; print(sys.base_prefix)").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $pythonDir = Join-Path $stage 'resources/python'
@@ -73,15 +73,55 @@ jobs:
           $p = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru
           if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'Desktop smoke test timed out' }
           if ($p.ExitCode -ne 0) { throw "Desktop smoke test exit code $($p.ExitCode)" }
-      - name: Create ZIP and checksum
+      - name: Compile and test Windows installer
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $out = Join-Path $env:RUNNER_TEMP 'release-assets'
           New-Item -ItemType Directory -Path $out -Force | Out-Null
-          $zip = Join-Path $out 'Appendix-B-v0.4.1-win-x64.zip'
-          Compress-Archive -Path $env:APPENDIX_STAGE -DestinationPath $zip -CompressionLevel Optimal
-          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
-          "$sha  Appendix-B-v0.4.1-win-x64.zip" | Set-Content (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $script = Join-Path $env:RUNNER_TEMP 'appendix.iss'
+          @"
+          [Setup]
+          AppId=AppendixBResearchLab
+          AppName=Appendix B
+          AppVersion=0.4.2
+          AppPublisher=Appendix B (with credit to DinoClaw)
+          DefaultDirName={localappdata}\Programs\Appendix B
+          DefaultGroupName=Appendix B
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          OutputDir=$out
+          OutputBaseFilename=Appendix-B-Setup-v0.4.2-win-x64
+          Compression=lzma2
+          SolidCompression=yes
+          UninstallDisplayIcon={app}\Appendix B.exe
+          [Files]
+          Source: "$env:APPENDIX_STAGE\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"
+          [Icons]
+          Name: "{group}\Appendix B"; Filename: "{app}\Appendix B.exe"
+          Name: "{autodesktop}\Appendix B"; Filename: "{app}\Appendix B.exe"; Tasks: desktopicon
+          [Run]
+          Filename: "{app}\Appendix B.exe"; Description: "Launch Appendix B"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content $script -Encoding utf8
+          & $compiler $script
+          $setup = Join-Path $out 'Appendix-B-Setup-v0.4.2-win-x64.exe'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $setup)) { throw 'Installer build failed' }
+          $testDir = Join-Path $env:RUNNER_TEMP 'installed-appendix'
+          $p = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="' + $testDir + '"')) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
+          $p = Start-Process -FilePath (Join-Path $testDir 'Appendix B.exe') -ArgumentList '--smoke-test' -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'Installed app timed out' }
+          if ($p.ExitCode -ne 0) { throw "Installed app failed: $($p.ExitCode)" }
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
+          "$sha  Appendix-B-Setup-v0.4.2-win-x64.exe" | Set-Content (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
           "APPENDIX_ASSETS=$out" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4
         with:
@@ -92,15 +132,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = 'v0.4.1-windows-preview'
+          $tag = 'v0.4.2-windows-installer'
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -eq 0) { Write-Host 'Release already exists; keeping existing assets.'; exit 0 }
           $notes = @'
-          Experimental Windows x64 portable build of Appendix B Cognitive Research Lab.
+          Experimental Windows x64 installer build of Appendix B Cognitive Research Lab.
           
           With credit to [DinoClaw](https://github.com/AaronGrace978/DinoClaw).
           
-          Extract the ZIP, open the Appendix-B folder, and launch Appendix B.exe.
+          Download and run Appendix-B-Setup-v0.4.2-win-x64.exe. No ZIP extraction required.
           Includes Electron 45.5.0 and Python. No separate Python or Node install required.
           Unsigned preview; Windows SmartScreen may warn.
           
@@ -110,5 +150,5 @@ jobs:
           '@
           $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           $notes | Set-Content $notesFile -Encoding utf8
-          gh release create $tag (Join-Path $env:APPENDIX_ASSETS 'Appendix-B-v0.4.1-win-x64.zip') (Join-Path $env:APPENDIX_ASSETS 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Appendix B v0.4.1 — Windows Preview' --notes-file $notesFile --prerelease
+          gh release create $tag (Join-Path $env:APPENDIX_ASSETS 'Appendix-B-Setup-v0.4.2-win-x64.exe') (Join-Path $env:APPENDIX_ASSETS 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Appendix B v0.4.2 — Windows Preview' --notes-file $notesFile --prerelease
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
