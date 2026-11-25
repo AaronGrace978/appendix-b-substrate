@@ -55,10 +55,17 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'Appendix-B'
           Copy-Item -LiteralPath 'desktop/node_modules/electron/dist' -Destination $stage -Recurse
           Rename-Item -LiteralPath (Join-Path $stage 'electron.exe') -NewName 'Appendix B.exe'
+          # Brand the executable: icon, product name and version in Explorer/taskbar.
+          $env:APPENDIX_EXE = Join-Path $stage 'Appendix B.exe'
+          $env:APPENDIX_ICO = (Resolve-Path 'desktop/icon.ico').Path
+          Push-Location desktop
+          node -e "const m=require('rcedit');const f=m.rcedit||m.default||m;const v=process.env.APP_VERSION;f(process.env.APPENDIX_EXE,{icon:process.env.APPENDIX_ICO,'file-version':v,'product-version':v,'version-string':{ProductName:'Appendix B',FileDescription:'Appendix B Cognitive Research Lab',CompanyName:'BostonAI.io',LegalCopyright:'Aaron Grace',OriginalFilename:'Appendix B.exe',InternalName:'Appendix B'}}).then(()=>console.log('exe branded'),e=>{console.error(e);process.exit(1)})"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
           $appDir = Join-Path $stage 'resources/app'
           $desktop = Join-Path $appDir 'desktop'
           New-Item -ItemType Directory -Path $desktop -Force | Out-Null
-          foreach ($file in @('main.cjs','preload.cjs','index.html','renderer.js','README.md')) {
+          foreach ($file in @('main.cjs','preload.cjs','index.html','renderer.js','README.md','icon.png','icon.ico')) {
             Copy-Item -LiteralPath "desktop/$file" -Destination $desktop
           }
           foreach ($file in @('runtime_v2.py','behavioral.py','desktop_bridge.py','README.md')) {
@@ -108,6 +115,10 @@ jobs:
           Compression=lzma2
           SolidCompression=yes
           UninstallDisplayIcon={app}\Appendix B.exe
+          SetupIconFile=$((Resolve-Path 'desktop/icon.ico').Path)
+          WizardStyle=modern
+          AppPublisherURL=https://github.com/AaronGrace978/appendix-b-substrate
+          VersionInfoVersion=$($env:APP_VERSION)
           [Files]
           Source: "$env:APPENDIX_STAGE\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
           [Tasks]

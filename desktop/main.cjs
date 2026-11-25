@@ -27,7 +27,7 @@ function bridge(req) {
   });
 }
 app.whenReady().then(async()=>{
-  win=new BrowserWindow({width:1320,height:880,minWidth:960,minHeight:640,backgroundColor:'#080b10',title:'Appendix B',autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+  win=new BrowserWindow({width:1320,height:880,minWidth:960,minHeight:640,backgroundColor:'#080b10',title:'Appendix B',autoHideMenuBar:true,icon:path.join(__dirname,'icon.png'),webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
   win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   win.webContents.on('will-navigate',e=>e.preventDefault());
   ipcMain.handle('lab:request',(e,req)=>{if(e.sender!==win.webContents || e.senderFrame!==win.webContents.mainFrame)throw Error('Invalid sender');return bridge(req)});
