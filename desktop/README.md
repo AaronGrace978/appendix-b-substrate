@@ -38,4 +38,11 @@ cd desktop
 npm run check
 ```
 
-No installer, signed release, or live provider test is included in this prototype.
+## Windows preview release
+
+The release workflow builds a portable Windows x64 ZIP with Electron and a private Python runtime. Extract the entire archive and double-click `Appendix B.exe`. No system Node.js or Python installation is required for the portable build. The build is unsigned; Windows SmartScreen may warn. Live provider credentials and network access are still required for cloud experiments. The release is experimental, not a validated reasoning improvement.
+
+## Credits
+
+With credit to [DinoClaw](https://github.com/AaronGrace978/DinoClaw), a fellow AI desktop project by the creator of Appendix B.
+
