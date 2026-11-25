@@ -1,5 +1,11 @@
 # Appendix B Substrate
 
+![Appendix B Cognitive Research Lab — Windows Preview](assets/appendix-b-banner.webp)
+
+*Promotional concept artwork; illustrative dashboard, not measured benchmark results.*
+
+With credit to [DinoClaw](https://github.com/AaronGrace978/DinoClaw).
+
 A dependency-free Python substrate for agent task loops that enforces:
 
 **decompose → skeptical attack → independent verification → conclusion**
