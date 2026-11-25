@@ -110,7 +110,14 @@ model callbacks, matched token/tool budgets and independent scoring.
 Measure accuracy, abstention, counterexample recovery, cost and robustness.
 
 
-## Appendix B Desktop Lab — Windows preview
+## Appendix B Desktop Lab — Windows
+
+**Install:** download `Appendix-B-Setup-vX.Y.Z-win-x64.exe` from [Releases](https://github.com/AaronGrace978/appendix-b-substrate/releases/latest) and run it.
+
+v0.5 adds a **Chat** tab: talk to any model directly, pick it from a dropdown filled
+from the provider's live catalog, and optionally switch on **Protocol** so replies
+follow decompose → attack → verify → conclude. The interface was redesigned around
+the substrate itself: a protocol rail, live state gauges and verdict-coded results.
 
 See [desktop setup and Windows release instructions](desktop/README.md).
 The experimental desktop lab supports OpenAI, Anthropic, OpenRouter, Ollama

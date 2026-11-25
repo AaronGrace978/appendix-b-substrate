@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from desktop_bridge import Provider, letter_verifier, run
+from desktop_bridge import Provider, chat, letter_verifier, run
 from runtime_v2 import Verdict
 
 
@@ -30,6 +30,31 @@ class BridgeTests(unittest.TestCase):
                     self.assertEqual(p.generate("instruction", {}), "answer")
                     self.assertEqual(p.calls, 1)
                     self.assertEqual(request.call_args.args[1]["model"], "test")
+
+    def test_chat_multiturn(self):
+        fixtures = {
+            "openai": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}]},
+            "anthropic": {"content": [{"type": "text", "text": "hi"}]},
+            "openrouter": {"choices": [{"message": {"content": "hi"}}]},
+            "ollama-local": {"message": {"content": "hi"}},
+        }
+        turns = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
+                 {"role": "user", "content": "c"}]
+        for name, data in fixtures.items():
+            with self.subTest(name=name), patch.object(Provider, "request", return_value=data) as request:
+                out = chat({"provider": {"name": name, "key": "k", "model": "m"},
+                            "messages": turns, "protocol": True})
+                self.assertEqual(out["text"], "hi")
+                body = request.call_args.args[1]
+                sent = body.get("messages") or body.get("input")
+                self.assertEqual([m["content"] for m in sent if m["role"] != "system"], ["a", "b", "c"])
+                system = body.get("system") or body.get("instructions") or sent[0]["content"]
+                self.assertIn("DECOMPOSE", system)
+
+    def test_chat_rejects_bad_turns(self):
+        for messages in ([], [{"role": "assistant", "content": "x"}], [{"role": "system", "content": "x"}]):
+            with self.assertRaises(ValueError):
+                chat({"provider": {"name": "ollama-local", "model": "m"}, "messages": messages})
 
     def test_exact_positions(self):
         v = letter_verifier("strawberry", "r")

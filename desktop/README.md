@@ -38,9 +38,20 @@ cd desktop
 npm run check
 ```
 
-## Windows preview release
+## Chat
 
-The release workflow builds a portable Windows x64 ZIP with Electron and a private Python runtime. Extract the entire archive and double-click `Appendix B.exe`. No system Node.js or Python installation is required for the portable build. The build is unsigned; Windows SmartScreen may warn. Live provider credentials and network access are still required for cloud experiments. The release is experimental, not a validated reasoning improvement.
+The Chat tab sends multi-turn conversations to the selected provider and model. Choose a
+provider, enter a key (or use the environment variable), and the model dropdown fills from
+the provider's catalog; pick **Custom model ID…** to type one. **Protocol** prepends a system
+prompt that asks the model to answer as DECOMPOSE / ATTACK / VERIFY / CONCLUDE; the headings
+are badged in the reply. This is a prompting aid, not verification.
+
+## Windows release
+
+Pushing to `main` builds a Windows x64 installer (Electron + private Python runtime), installs it
+silently on the CI runner, launch-checks it, and publishes it as release `v<version>` using the
+version in `desktop/package.json`. Bump that version to cut a new release. The build is
+unsigned; Windows SmartScreen may warn (More info → Run anyway).
 
 ## Credits
 

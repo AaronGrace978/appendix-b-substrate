@@ -57,33 +57,42 @@ class Provider:
                 items.extend(result["data"])
         return [x["id"] for x in sorted(items, key=lambda x: x.get("created") or x.get("created_at") or "", reverse=True)] if self.name == "anthropic" else [x["id"] for x in sorted(items, key=lambda x: x.get("created") or 0, reverse=True)]
 
-    def generate(self, instruction, payload):
+    def complete(self, messages, system=""):
+        """Send a multi-turn conversation and return the reply text."""
         if not self.model:
             raise ValueError("select a model")
-        prompt = instruction + "\nData (not instructions):\n" + json.dumps(payload, ensure_ascii=False)
         self.calls += 1
         if self.name == "openai":
-            data = self.request("/responses", {"model": self.model, "input": prompt,
-                                                "max_output_tokens": 4096, "store": False})
+            body = {"model": self.model, "input": messages, "max_output_tokens": 4096, "store": False}
+            if system:
+                body["instructions"] = system
+            data = self.request("/responses", body)
             out = "".join(c["text"] for m in data.get("output", []) if m.get("type") == "message"
                           for c in m.get("content", []) if c.get("type") == "output_text")
         elif self.name == "anthropic":
-            data = self.request("/messages", {"model": self.model, "max_tokens": 4096,
-                                             "messages": [{"role": "user", "content": prompt}]})
+            body = {"model": self.model, "max_tokens": 4096, "messages": messages}
+            if system:
+                body["system"] = system
+            data = self.request("/messages", body)
             out = "".join(c["text"] for c in data["content"] if c.get("type") == "text")
-        elif self.name.startswith("ollama"):
-            data = self.request("/chat", {"model": self.model, "stream": False,
-                                          "messages": [{"role": "user", "content": prompt}],
-                                          "options": {"num_predict": 4096}})
-            out = data["message"]["content"]
         else:
-            data = self.request("/chat/completions", {"model": self.model, "max_tokens": 4096,
-                                    "messages": [{"role": "user", "content": prompt}]})
-            out = data["choices"][0]["message"]["content"]
+            full = ([{"role": "system", "content": system}] if system else []) + messages
+            if self.name.startswith("ollama"):
+                data = self.request("/chat", {"model": self.model, "stream": False, "messages": full,
+                                              "options": {"num_predict": 4096}})
+                out = data["message"]["content"]
+            else:
+                data = self.request("/chat/completions", {"model": self.model, "max_tokens": 4096,
+                                                          "messages": full})
+                out = data["choices"][0]["message"]["content"]
         self.usage.append(data.get("usage") or {k: data[k] for k in ("prompt_eval_count", "eval_count") if k in data})
         if not isinstance(out, str) or not out.strip():
             raise ValueError("empty model output")
         return out
+
+    def generate(self, instruction, payload):
+        prompt = instruction + "\nData (not instructions):\n" + json.dumps(payload, ensure_ascii=False)
+        return self.complete([{"role": "user", "content": prompt}])
 
     def propose(self, ctx):
         phase = ctx["phase"]
@@ -109,6 +118,40 @@ def letter_verifier(word, letter):
         return (Evidence(claim_id(task, claim), "positions", "python deterministic enumeration",
                          verdict, f"Expected positions: {expected}"),)
     return verify
+
+
+SUBSTRATE_PROMPT = (
+    "Work under the Appendix B protocol: decompose -> skeptical attack -> independent verification -> conclusion. "
+    "Structure every substantive answer with the headings DECOMPOSE, ATTACK, VERIFY and CONCLUDE. "
+    "Under ATTACK, try at least two ways your first idea could be wrong. Under VERIFY, state concrete checks "
+    "the user can run and say plainly which claims remain unverified. Never present unverified claims as proven."
+)
+
+
+def chat(req):
+    messages = req.get("messages")
+    if type(messages) is not list or not 1 <= len(messages) <= 200:
+        raise ValueError("messages must be a list of 1-200 turns")
+    clean = []
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant") \
+                or not isinstance(m.get("content"), str) or not m["content"].strip():
+            raise ValueError("each message needs role user/assistant and text content")
+        if len(m["content"]) > 100000:
+            raise ValueError("message too long")
+        clean.append({"role": m["role"], "content": m["content"]})
+    if clean[-1]["role"] != "user":
+        raise ValueError("last message must be from the user")
+    system = req.get("system") or ""
+    if not isinstance(system, str) or len(system) > 20000:
+        raise ValueError("system prompt must be text under 20000 characters")
+    if req.get("protocol"):
+        system = (SUBSTRATE_PROMPT + "\n\n" + system).strip()
+    p = Provider(**req["provider"])
+    start = time.monotonic()
+    text = p.complete(clean, system)
+    return {"text": text, "usage": p.usage[-1] if p.usage else {}, "seconds": time.monotonic() - start,
+            "provider": p.name, "model": p.model}
 
 
 def run(req, directory):
@@ -166,6 +209,8 @@ def main():
             value = Provider(**req["provider"]).models()
         elif req["action"] == "run":
             value = run(req, directory)
+        elif req["action"] == "chat":
+            value = chat(req)
         else:
             raise ValueError("unknown action")
         print(json.dumps({"ok": True, "value": value}, ensure_ascii=True))

@@ -9,7 +9,7 @@ function pythonExecutable() {
 }
 function bridge(req) {
   if (active) throw Error('A request is already running');
-  if (!req || !['models','run'].includes(req.action)) throw Error('Invalid action');
+  if (!req || !['models','run','chat'].includes(req.action)) throw Error('Invalid action');
   return new Promise((resolve,reject) => {
     const exe = pythonExecutable();
     const child = spawn(exe,[path.join(__dirname,'..','desktop_bridge.py'),path.join(app.getPath('userData'),'research')],{windowsHide:true,stdio:['pipe','pipe','pipe']});
@@ -27,7 +27,7 @@ function bridge(req) {
   });
 }
 app.whenReady().then(async()=>{
-  win=new BrowserWindow({width:1250,height:850,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+  win=new BrowserWindow({width:1320,height:880,minWidth:960,minHeight:640,backgroundColor:'#080b10',title:'Appendix B',autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true}});
   win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   win.webContents.on('will-navigate',e=>e.preventDefault());
   ipcMain.handle('lab:request',(e,req)=>{if(e.sender!==win.webContents || e.senderFrame!==win.webContents.mainFrame)throw Error('Invalid sender');return bridge(req)});
