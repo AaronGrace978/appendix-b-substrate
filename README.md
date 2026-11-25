@@ -54,3 +54,51 @@ Attempt limits do not impose wall-clock timeouts on callbacks.
 The runtime is synchronous, single-worker, and not a sandbox for untrusted Python.
 SQLite records are not tamper-proof; interrupted runs can be inspected but
 are not automatically resumed. Use a separate database per worker.
+
+
+## Experimental v0.3: behavioral distillation
+
+The motivating idea is to observe AI mathematical problem-solving behavior
+and translate observable actions into explicit Python control mechanisms.
+This is behavioral modeling, not extraction of private model reasoning,
+weights, consciousness, or reproduction of a particular unreleased model.
+
+`behavioral.py` adds coupled continuous dynamics, surprise after refutation,
+stagnation after repeated candidates, strategy rotation, a bounded candidate
+budget, and durable state/decision histories. Refuting a candidate does not
+refute the overall search problem. Unresolved searches abstain. Strategies
+are instructions for the proposer, not guarantees of independent reasoning.
+The verifier remains a trusted external boundary.
+
+```bash
+python -m unittest discover -v
+python benchmark_behavioral.py
+python trace_replay.py observations.jsonl
+```
+
+The benchmark is deliberately synthetic and strategy-sensitive. It tests
+controller wiring with the same proposer, verifier and maximum candidate
+budget in adaptive and fixed conditions, not improvement on actual LLMs.
+Neither elapsed time nor model token usage is matched.
+
+### Observation protocol
+
+Create a JSON Lines dataset with one source-tagged observation per line.
+Use public source URLs, stable transcript identifiers or experiment IDs,
+and a locator such as a turn number. Record externally observable outcomes,
+not inferred private thoughts. Example (synthetic):
+
+```json
+{"source":"synthetic-fixture","locator":"turn 1","event":"refuted","note":"Arithmetic rejected a candidate divisor."}
+{"source":"synthetic-fixture","locator":"turn 2","event":"duplicate","note":"The same candidate was proposed again."}
+```
+
+Supported events: supported, refuted, inconclusive and duplicate.
+Replay yields deterministic before/after state trajectories. Parameters are
+hypotheses, not fitted measurements. No Claude transcript has been ingested
+or annotated in this release.
+
+Next: collect documented traces, define an annotation rubric, use held-out
+tasks, and compare adaptive, fixed, and rotation-only controllers with real
+model callbacks, matched token/tool budgets and independent scoring.
+Measure accuracy, abstention, counterexample recovery, cost and robustness.
