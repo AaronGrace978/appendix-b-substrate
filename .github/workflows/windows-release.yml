@@ -151,13 +151,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v$($env:APP_VERSION)"
-          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
-          if ($LASTEXITCODE -eq 0) { Write-Host 'Release already exists; keeping existing assets.'; exit 0 }
+          # Inside this @" "@ here-string a backtick is PowerShell's escape character: write ``code`` for `code`.
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Models that check their work
 
+          **New in 0.8.0: number-theory checks**
+          - **Many more claims checked.** Besides arithmetic, primes, letter counts and Collatz steps, the ✓ / ✗ under a reply now covers gcd and lcm, factorials, binomials, φ(n), divisibility, congruences (``2^100 ≡ 2 (mod 7)``, computed with modular powers), perfect squares, cubes and powers, prime factorizations, divisor counts and sums, digit counts and sums, the nth prime, prime counts and Fibonacci numbers.
+          - **Plain text or LaTeX.** ``\binom{10}{3}``, ``\equiv``, ``\pmod{7}``, ``\times`` and ``\varphi`` are understood.
+          - **Careful, not noisy.** A number has to stand alone to be a claim, so "1 + 2 + 3 is divisible by 4" or "Run 3 has 4 divisors" are not read as claims about 3. Numbers beyond the checker's bounds are skipped, never marked ✗.
+
           **New in 0.7.3**
-          - **Checks see through function notation.** A line like `f(71) = 71² − 61 × 71 + 971 = 1681` is now checked: parts Python can't evaluate are set aside and the rest of the equation is still verified.
+          - **Checks see through function notation.** A line like ``f(71) = 71² − 61 × 71 + 971 = 1681`` is now checked: parts Python can't evaluate are set aside and the rest of the equation is still verified.
           - **Cleaner tracebacks on Windows.** When the model's code fails, it now sees only its own code in the error, not the runner's internal guard lines (Windows CRLF line endings broke the filter).
           - README: a real session where the model caught and fixed a bug in its own checker, plus a runnable claim-check example.
 
@@ -165,7 +169,7 @@ jobs:
           - **One protocol pass.** With Protocol and Code both on, the model runs code during VERIFY and continues from there, instead of restarting at DECOMPOSE after the results. Repeated phases are labelled *continued*.
           - **Readable maths.** Models are asked for plain-text maths; LaTeX that slips through (\[ \], \( \), cases, \boxed, \frac, superscripts, arrows) is rendered as clean Unicode.
           - **Smarter checks.** Collatz claims written in LaTeX (10{,}971 … 267 steps) are now checked, and nearby numbers are no longer mistaken for the claim.
-          - **New README** with real screenshots, runnable examples (`examples/`) and tests that keep them honest.
+          - **New README** with real screenshots, runnable examples (``examples/``) and tests that keep them honest.
 
           **New in 0.7.1: code running that models actually use**
           - Code now runs through each provider's built-in **tool calling** (Ollama, OpenRouter, Anthropic, OpenAI). Models like Kimi were trained to call tools this way and ignored the old text convention: they said "I'll compute it" and stopped. Models that don't support tools fall back automatically to code blocks.
@@ -208,5 +212,13 @@ jobs:
           "@
           $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           $notes | Set-Content $notesFile -Encoding utf8
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            # Keep the published installer; only refresh the notes.
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host 'Release already exists; kept its assets and refreshed its notes.'
+            exit 0
+          }
           gh release create $tag (Join-Path $env:APPENDIX_ASSETS "Appendix-B-Setup-v$($env:APP_VERSION)-win-x64.exe") (Join-Path $env:APPENDIX_ASSETS 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Appendix B v$($env:APP_VERSION)" --notes-file $notesFile --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
