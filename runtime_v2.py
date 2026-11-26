@@ -154,8 +154,28 @@ class Runtime:
         outcomes = {item.verdict for item in evidence}
         return outcomes.pop() if len(outcomes) == 1 else Verdict.INCONCLUSIVE
 
+    def _verified_outcome(
+        self, task: str, claim: str, evidence: tuple[Evidence, ...], required: frozenset[str],
+        negative_control: str | None, verify: Callable[[str], tuple[Evidence, ...]],
+    ) -> tuple[Verdict, dict | None, str]:
+        outcome = self._check(task, claim, evidence, required)
+        if outcome is Verdict.INCONCLUSIVE:
+            return outcome, None, "required checks were inconclusive"
+        if type(negative_control) is not str or not negative_control.strip():
+            return Verdict.INCONCLUSIVE, None, "a negative control is required"
+        if negative_control.strip() == claim:
+            return Verdict.INCONCLUSIVE, None, "the negative control must differ from the candidate"
+        control_evidence = verify(negative_control)
+        control_outcome = self._check(task, negative_control, control_evidence, required)
+        control = {"claim": negative_control, "verdict": control_outcome,
+                   "evidence": [asdict(item) for item in control_evidence]}
+        if control_outcome is not Verdict.REFUTED:
+            return Verdict.INCONCLUSIVE, control, "verifier did not refute the negative control"
+        return outcome, control, "required checks agree and negative control was refuted"
+
     def run(self, task: str, agent: Agent, verifier: Verifier, *,
-            required_checks: frozenset[str], max_attempts: int = 3) -> Result:
+            required_checks: frozenset[str], max_attempts: int = 3,
+            negative_control: str | None = None) -> Result:
         if type(task) is not str or not task.strip():
             raise ValueError("task must be nonempty")
         if (type(max_attempts) is not int or not 1 <= max_attempts <= 100
@@ -183,12 +203,14 @@ class Runtime:
                                    "minimum_attacks": count}).get("attacks"), count)
                 self._event(run_id, "attack", {"claim_id": claim_id(task, claim), "attacks": attacks})
                 report = verifier(task, claim, attacks)
-                verdict = self._check(task, claim, report, required_checks)
+                verdict, control, reason = self._verified_outcome(
+                    task, claim, report, required_checks, negative_control,
+                    lambda control_claim: verifier(task, control_claim, ()))
                 evidence = report
-                self._event(run_id, "verify", {"verdict": verdict, "evidence": [asdict(e) for e in evidence]},
+                self._event(run_id, "verify", {"verdict": verdict, "evidence": [asdict(e) for e in evidence],
+                                               "negative_control": control, "reason": reason},
                             self.state.observe(verdict))
                 if verdict is not Verdict.INCONCLUSIVE:
-                    reason = "required checks agree"
                     break
         except Exception as exc:
             verdict, evidence = Verdict.INCONCLUSIVE, ()

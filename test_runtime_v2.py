@@ -18,11 +18,10 @@ def agent(ctx):
 
 
 def verifier(task, claim, attacks):
-    if claim != "40**2 + 40 + 41 is prime":
-        raise ValueError("unsupported claim")
-    n = 40**2 + 40 + 41
-    verdict = Verdict.REFUTED if n == 41*41 else Verdict.INCONCLUSIVE
-    return (Evidence(claim_id(task, claim), "factor", "integer arithmetic", verdict, f"{n} = 41 * 41"),)
+    n, divisor = {"40**2 + 40 + 41 is prime": (1681, 41), "9 is prime": (9, 3)}[claim]
+    verdict = Verdict.REFUTED if n % divisor == 0 else Verdict.INCONCLUSIVE
+    return (Evidence(claim_id(task, claim), "factor", "integer arithmetic", verdict,
+                     f"{n} is divisible by {divisor}"),)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -30,8 +29,9 @@ class RuntimeTests(unittest.TestCase):
         self.runtime = Runtime()
         self.addCleanup(self.runtime.close)
 
-    def run_task(self, a=agent, v=verifier, **kwargs):
-        return self.runtime.run("Test primality", a, v, required_checks=frozenset({"factor"}), **kwargs)
+    def run_task(self, a=agent, v=verifier, *, negative_control="9 is prime", **kwargs):
+        return self.runtime.run("Test primality", a, v, required_checks=frozenset({"factor"}),
+                                negative_control=negative_control, **kwargs)
 
     def test_refutation_and_audit(self):
         result = self.run_task()
@@ -39,6 +39,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(result.answer.startswith("REFUTED:"))
         self.assertEqual([e["kind"] for e in self.runtime.history(result.run_id)],
                          ["start", "decompose", "hypothesize", "attack", "verify", "conclude"])
+
+    def test_missing_negative_control_blocks_conclusion(self):
+        result = self.run_task(negative_control=None)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("negative control is required", result.reason)
+
+    def test_always_accept_mutant_is_blocked_and_audited(self):
+        def always_accept(task, claim, attacks):
+            return (Evidence(claim_id(task, claim), "factor", "fixture",
+                             Verdict.SUPPORTED, "accepted unconditionally"),)
+
+        result = self.run_task(v=always_accept, max_attempts=1)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        event = self.runtime.history(result.run_id)[-2]
+        self.assertEqual(event["data"]["negative_control"]["claim"], "9 is prime")
+        self.assertEqual(event["data"]["negative_control"]["verdict"], "supported")
 
     def test_skip(self):
         result = self.run_task(lambda _: {"phase": "conclude"})
@@ -79,7 +95,8 @@ class RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "state.db")
             first = Runtime(path)
-            result = first.run("Test primality", agent, verifier, required_checks=frozenset({"factor"}))
+            result = first.run("Test primality", agent, verifier, required_checks=frozenset({"factor"}),
+                               negative_control="9 is prime")
             state = first.state
             first.close()
             second = Runtime(path)

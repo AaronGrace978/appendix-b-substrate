@@ -15,7 +15,8 @@ class BehavioralTests(unittest.TestCase):
 
     def search(self, p=proposer, v=verifier, **kwargs):
         return self.runtime.search("Find a divisor", p, v,
-                                   required_checks=frozenset({"remainder"}), **kwargs)
+                                   required_checks=frozenset({"remainder"}),
+                                   negative_control="1681 is divisible by 39", **kwargs)
 
     def test_refutation_is_not_task_refutation(self):
         result = self.search(budget=1)
@@ -62,7 +63,8 @@ class BehavioralTests(unittest.TestCase):
             first = SearchRuntime(path)
             try:
                 result = first.search("Find divisor", proposer, verifier,
-                                      required_checks=frozenset({"remainder"}), budget=1)
+                                      required_checks=frozenset({"remainder"}),
+                                   negative_control="1681 is divisible by 39", budget=1)
                 state = first.dynamics
             finally:
                 first.close()

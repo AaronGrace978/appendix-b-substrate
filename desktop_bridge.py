@@ -563,12 +563,15 @@ def run(req, directory):
     if type(budget) is not int or not 1 <= budget <= 8:
         raise ValueError("budget must be 1–8")
     mode = req["mode"]
+    negative_control = None
     if mode == "letters":
         word, letter = req["word"], req["letter"]
         if not re.fullmatch("[A-Za-z]{1,100}", word) or not re.fullmatch("[A-Za-z]", letter):
             raise ValueError("use 1–100 ASCII letters and one target letter")
         task = f"In {word}, find every 1-based position of letter {letter}, ignoring case. Candidate claim must be a JSON array of integer positions."
         verifier, checks = letter_verifier(word, letter), frozenset({"positions"})
+        # Omitting all matches or inventing a match at position one.
+        negative_control = "[]" if letter.lower() in word.lower() else "[1]"
     elif mode == "research":
         task = req["task"].strip()
         if not task or len(task) > 10000:
@@ -592,7 +595,8 @@ def run(req, directory):
     rt = SearchRuntime(":memory:" if req.get("fresh") else str(directory / (ident + ".sqlite")))
     try:
         start = time.monotonic()
-        result = rt.search(task, p.propose, verifier, required_checks=checks, budget=budget, adaptive=adaptive)
+        result = rt.search(task, p.propose, verifier, required_checks=checks, budget=budget,
+                           adaptive=adaptive, negative_control=negative_control)
         return {"result": asdict(result), "events": rt.history(result.run_id),
                 "state": asdict(rt.dynamics), "seconds": time.monotonic() - start,
                 "calls": p.calls + (review.calls if review else 0),

@@ -25,14 +25,14 @@ def proposer(ctx):                      # stands in for a model call
 
 def verifier(task, claim, strategy, attacks):   # trusted: computed, never asked
     n = int(claim)
-    ok = steps(n) >= 260 and all(steps(m) < 260 for m in range(10001, n))
+    ok = n > 10000 and steps(n) >= 260 and all(steps(m) < 260 for m in range(10001, n))
     verdict = Verdict.SUPPORTED if ok else Verdict.REFUTED
     return (Evidence(claim_id(task, claim), "exhaustive", "python", verdict, f"{n} takes {steps(n)} steps"),)
 
 
 rt = SearchRuntime()                    # SearchRuntime("state.db") persists state across runs
 result = rt.search("smallest n > 10,000 with >= 260 Collatz steps", proposer, verifier,
-                   required_checks=frozenset({"exhaustive"}), budget=4)
+                   required_checks=frozenset({"exhaustive"}), budget=4, negative_control="10001")
 
 for c in result.candidates:
     print(c.claim, c.verdict.value, "-", c.evidence[0].detail)

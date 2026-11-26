@@ -149,14 +149,14 @@ def proposer(ctx):                      # stands in for a model call
 
 def verifier(task, claim, strategy, attacks):   # trusted: computed, never asked
     n = int(claim)
-    ok = steps(n) >= 260 and all(steps(m) < 260 for m in range(10001, n))
+    ok = n > 10000 and steps(n) >= 260 and all(steps(m) < 260 for m in range(10001, n))
     verdict = Verdict.SUPPORTED if ok else Verdict.REFUTED
     return (Evidence(claim_id(task, claim), "exhaustive", "python", verdict, f"{n} takes {steps(n)} steps"),)
 
 
 rt = SearchRuntime()                    # SearchRuntime("state.db") persists state across runs
 result = rt.search("smallest n > 10,000 with >= 260 Collatz steps", proposer, verifier,
-                   required_checks=frozenset({"exhaustive"}), budget=4)
+                   required_checks=frozenset({"exhaustive"}), budget=4, negative_control="10001")
 
 for c in result.candidates:
     print(c.claim, c.verdict.value, "-", c.evidence[0].detail)
@@ -170,6 +170,12 @@ print("surprise after the refuted guess:", round(rt.dynamics.surprise, 2))
 verdict: supported ('10971',)
 surprise after the refuted guess: 0.23
 ```
+
+### Negative controls in the verification harness
+
+For `Runtime.run` and `SearchRuntime.search`, supply a known-false claim in the same task and claim format as `negative_control`. The harness runs the same verifier on that claim with no model-supplied attacks and requires the configured checks to return `REFUTED`. The candidate stays inconclusive if the control is missing, accepted, or inconclusive. Inspect the control claim, result, and evidence in the run history. The four-phase `ThinkingSubstrate` takes a trusted negative-control check in its `Verification` report before it can advance to CONCLUDE.
+
+Pick controls that target a plausible mistake, such as an off-by-one boundary or a missing match. Define the proposition and its assumptions first, anchor the verifier with hand-checked cases or an independent oracle, and track mathematical and empirical claims separately. The gate establishes that the verifier rejected the selected control. Other verifier defects and shared specification errors remain possible.
 
 ### Check claims in any model reply
 

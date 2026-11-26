@@ -71,7 +71,12 @@ class BridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(Provider, "propose", propose):
             req = {"provider": {"name": "openai", "model": "test"}, "mode": "letters",
                    "word": "strawberry", "letter": "r", "budget": 2, "fresh": True}
-            self.assertIs(run(req, Path(d))["result"]["verdict"], Verdict.SUPPORTED)
+            response = run(req, Path(d))
+            self.assertIs(response["result"]["verdict"], Verdict.SUPPORTED)
+            control = next(event["data"]["negative_control"] for event in response["events"]
+                           if event["kind"] == "observation")
+            self.assertEqual(control["claim"], "[]")
+            self.assertEqual(control["verdict"], "refuted")
             req.update(mode="research", task="A conjecture")
             self.assertIs(run(req, Path(d))["result"]["verdict"], Verdict.INCONCLUSIVE)
 

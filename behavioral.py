@@ -121,7 +121,7 @@ class SearchRuntime(Runtime):
 
     def search(self, task: str, proposer: Proposer, verifier: Verifier, *,
                required_checks: frozenset[str], budget: int = 8,
-               adaptive: bool = True) -> SearchResult:
+               adaptive: bool = True, negative_control: str | None = None) -> SearchResult:
         if type(task) is not str or not task.strip():
             raise ValueError("task required")
         if type(budget) is not int or not 1 <= budget <= 100:
@@ -160,12 +160,17 @@ class SearchRuntime(Runtime):
                                    "minimum_attacks": 2}).get("attacks"), 2)
                 self._event(run_id, "candidate", {"claim": claim, "strategy": strategy, "attacks": attacks})
                 evidence = verifier(task, claim, strategy, attacks)
-                outcome = self._check(task, claim, evidence, required_checks)
+                outcome, control, verification_reason = self._verified_outcome(
+                    task, claim, evidence, required_checks, negative_control,
+                    lambda control_claim: verifier(task, control_claim, strategy, ()))
+                if outcome is Verdict.INCONCLUSIVE:
+                    reason = verification_reason
                 candidates.append(Candidate(claim, strategy, outcome, evidence))
                 self._observation(run_id, outcome.value, {"claim": claim, "strategy": strategy,
-                                  "evidence": [asdict(e) for e in evidence]}, adaptive)
+                                  "evidence": [asdict(e) for e in evidence],
+                                  "negative_control": control, "reason": verification_reason}, adaptive)
                 if outcome is Verdict.SUPPORTED:
-                    verdict, reason = outcome, "candidate satisfies configured checks"
+                    verdict, reason = outcome, verification_reason
                     break
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"

@@ -106,10 +106,12 @@ class Verification:
     checks: tuple[Check, ...]
     # False can mean a verified falsification; ok describes check execution.
     claim_supported: bool | None = None
+    negative_control: Check | None = None
 
     @property
     def ok(self) -> bool:
-        return bool(self.checks) and all(check.passed for check in self.checks)
+        return (bool(self.checks) and all(check.passed for check in self.checks)
+                and self.negative_control is not None and self.negative_control.passed is True)
 
 
 @dataclass(frozen=True)
@@ -230,7 +232,8 @@ class ThinkingSubstrate:
                     raise ProtocolError("verify requires a concrete claim")
                 raw_report = verifier(task, claim, payload)
                 if isinstance(raw_report, Verification):
-                    report = Verification(claim, tuple(raw_report.checks), raw_report.claim_supported)
+                    report = Verification(claim, tuple(raw_report.checks), raw_report.claim_supported,
+                                          raw_report.negative_control)
                 else:
                     report = Verification(claim, tuple(raw_report))
                 if not report.checks:
@@ -309,7 +312,7 @@ def _demo_verifier(task: str, claim: str, payload: Mapping[str, Any]) -> Verific
     for n, value in counterexamples:
         divisor = next((d for d in range(2, math.isqrt(value) + 1) if value % d == 0), None)
         witnesses.append((n, value, divisor))
-    controls = ((2, True), (3, True), (4, False), (9, False), (41, True), (1681, False))
+    known_primes = (2, 3, 41)
     witness_text = "; ".join(
         f"n={n}: {value} = {divisor} x {value // divisor}" if divisor else f"n={n}: no divisor"
         for n, value, divisor in witnesses
@@ -317,12 +320,14 @@ def _demo_verifier(task: str, claim: str, payload: Mapping[str, Any]) -> Verific
     checks = (
         Check("domain-exhausted", domain == list(range(41)) and len(values) == 41,
               f"evaluated {len(values)} domain points (0 through 40)"),
-        Check("primality-controls", all(_is_prime(number) == expected for number, expected in controls),
-              "known prime/composite controls passed"),
+        Check("known-primes", all(_is_prime(number) for number in known_primes),
+              "2, 3 and 41 should be classified as prime"),
         Check("counterexample-witnesses", all(divisor is not None and value % divisor == 0
               for _, value, divisor in witnesses), witness_text),
     )
-    return Verification(claim, checks, claim_supported=not counterexamples)
+    negative_control = Check("known-composites", all(not _is_prime(n) for n in (4, 9, 169)),
+                             "4, 9 and 169 must be rejected as primes")
+    return Verification(claim, checks, claim_supported=not counterexamples, negative_control=negative_control)
 
 
 def main() -> None:
@@ -333,7 +338,7 @@ def main() -> None:
     for turn in result.turns:
         print(f"turn {turn.number}: {turn.phase.value}; emotion={turn.emotion}")
     print("independent checks:")
-    for check in result.verification.checks:
+    for check in (*result.verification.checks, result.verification.negative_control):
         print(f"  {'PASS' if check.passed else 'FAIL'} {check.name}: {check.detail}")
     print(f"verified={result.verified}; claim_supported={result.verification.claim_supported}")
     print(f"answer={result.answer}")

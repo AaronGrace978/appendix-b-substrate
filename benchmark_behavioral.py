@@ -16,7 +16,7 @@ def proposer(ctx):
 
 
 def verifier(task, claim, strategy, attacks):
-    candidates = {f"1681 is divisible by {n}": n for n in (37, 41)}
+    candidates = {f"1681 is divisible by {n}": n for n in (37, 39, 41)}
     if claim not in candidates:
         raise ValueError("unknown fixture claim")
     n = candidates[claim]
@@ -33,7 +33,7 @@ def compare(budget=4):
         try:
             result = runtime.search("Find a nontrivial divisor of 1681", proposer, verifier,
                                     required_checks=frozenset({"remainder"}), budget=budget,
-                                    adaptive=adaptive)
+                                    adaptive=adaptive, negative_control="1681 is divisible by 39")
             events = runtime.history(result.run_id)
             results["adaptive" if adaptive else "fixed"] = {
                 "verdict": result.verdict.value,

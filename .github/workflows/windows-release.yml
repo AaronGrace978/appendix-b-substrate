@@ -155,6 +155,10 @@ jobs:
           $notes = @"
           ## Appendix B v$($env:APP_VERSION) — Models that check their work
 
+          **New in 0.9.0: negative controls in the verification harness**
+          - The letter-position experiment runs a known-wrong answer through the same verifier before accepting a candidate. Missing or unsuccessful controls leave the result inconclusive.
+          - Experiment traces record the control result and its evidence. Chat's Protocol mode continues to structure model replies, with independent claim checks shown below the reply.
+
           **New in 0.8.0: number-theory checks**
           - **Many more claims checked.** Besides arithmetic, primes, letter counts and Collatz steps, the ✓ / ✗ under a reply now covers gcd and lcm, factorials, binomials, φ(n), divisibility, congruences (``2^100 ≡ 2 (mod 7)``, computed with modular powers), perfect squares, cubes and powers, prime factorizations, divisor counts and sums, digit counts and sums, the nth prime, prime counts and Fibonacci numbers.
           - **Plain text or LaTeX.** ``\binom{10}{3}``, ``\equiv``, ``\pmod{7}``, ``\times`` and ``\varphi`` are understood.
