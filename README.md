@@ -48,7 +48,7 @@ The workflow follows the publicly described pattern of recent human–AI mathema
 |---|---|
 | **Protocol** | Replies follow Decompose → Attack → Verify → Conclude, each phase drawn as its own card |
 | **Code** | The model can run Python to compute and check its work, through each provider's native tool calling |
-| ✓ / ✗ under a reply | Arithmetic, prime, letter-count and Collatz claims recomputed independently in Python |
+| ✓ / ✗ under a reply | Arithmetic, primes, letter counts, Collatz and number-theory claims recomputed independently in Python |
 | Reasoning panel | Live, collapsible reasoning stream from thinking models (DeepSeek, Kimi, gpt-oss…) |
 
 Keys stay in memory only and are never written to disk.
@@ -192,6 +192,40 @@ for c in extract_checks(reply):
 
 Runnable as [`examples/check_claims.py`](examples/check_claims.py).
 
+Number-theory claims are checked the same way, in plain text or LaTeX ([`examples/check_number_theory.py`](examples/check_number_theory.py)):
+
+```python
+reply = r"""The prime factorization of 360 is 2^3 \times 3^2 \times 5, so 360 has 24 divisors.
+Also gcd(84, 36) = 12, \binom{10}{3} = 120, 10! = 3,628,800 and 2^{100} \equiv 1 \pmod{7}.
+The 100th prime is 541, there are 25 primes below 100, and 1001 is divisible by 13."""
+```
+
+```text
+✓ gcd(84, 36) = 12 — Python computes gcd(84, 36) = 12
+✓ 10! = 3,628,800 — Python computes 10! = 3628800
+✓ \binom{10}{3} = 120 — Python computes C(10, 3) = 120
+✓ 1001 is divisible by 13 — 1001 = 13 × 77
+✗ 2^100 ≡ 1 (mod 7) — Python computes 2^100 mod 7 = 2
+✓ prime factorization of 360 is 2^3 × 3^2 × 5 — Python factors 360 = 2³ × 3² × 5
+✓ 360 has 24 divisors — 360 = 2³ × 3² × 5 has 24 divisors
+✓ The 100th prime is 541 — the 100th prime is 541 (2 is the 1st)
+✓ there are 25 primes below 100 — Python counts 25 primes < 100
+```
+
+| Kind | Claim shapes recognised |
+|---|---|
+| functions | `gcd(a, b) = c`, `lcm`, "the greatest common divisor of a and b is c", `n! = v`, `C(n, k)`, `\binom{n}{k}`, "n choose k", `φ(n)` |
+| divisibility | "a is (not) divisible by b", "a is a multiple of b", "b divides a", `b ∣ a`, `\nmid` |
+| modular | `a ≡ r (mod m)`, `\pmod{m}`, "a mod m = r", with powers like `2^100` computed by `pow(b, e, m)` |
+| powers | "n is a perfect square / cube / power", "n is a power of b" |
+| factorization | "the prime factorization of n is 2³ × 3² × 5": product and primality of every factor |
+| divisors | "n has k divisors", "number of divisors of n is k", `τ(n)`, `σ(n)`, distinct prime factors, perfect numbers |
+| digits | "n has k digits", "the digit sum of n is k", including powers such as `2^100` |
+| primes | "the 100th prime is 541", "541 is the 100th prime", "there are 25 primes below 100", `π(n) = k` |
+| fibonacci | `F(n) = v`, `F_n = v`, "the nth Fibonacci number is v", only in replies that mention Fibonacci |
+
+The number-theory checkers are narrow on purpose. A number only counts as a claim's subject when it stands alone, so "1 + 2 + 3 is divisible by 4" and "Run 3 has 4 divisors" are not read as claims about 3. Inputs beyond bounded ranges (factoring up to 10¹², primes up to 5 × 10⁶) are skipped, not refuted.
+
 Claims the checker doesn't recognise are simply not checked; no check is not support. Code blocks are evidence, not claims, and are skipped. Parts of an equation Python can't evaluate, like `f(71)`, are set aside and the rest of the chain is still checked.
 
 ## Architecture
@@ -211,7 +245,7 @@ flowchart LR
 | `runtime_v2.py` | Protocol runtime: decomposition, hypotheses, attacks, claim-bound evidence, verdicts, SQLite event history |
 | `behavioral.py` | Coupled substrate dynamics, strategy rotation, bounded candidate search, persistent state |
 | `code_runner.py` | Restricted runner for model-written code |
-| `chat_checks.py` | Independent checks for claims in free text (bounded AST arithmetic, primes, letters, Collatz) |
+| `chat_checks.py` | Independent checks for claims in free text (bounded AST arithmetic, primes, letters, Collatz, number theory) |
 | `desktop_bridge.py` | Provider gateway: streaming, native tool calls, retries on 5xx/429, reasoning streams, chat loop |
 | `desktop/` | Electron app (context-isolated, sandboxed renderer, strict CSP) |
 | `substrate.py` | Original v0.1 substrate, unchanged for baseline comparisons |

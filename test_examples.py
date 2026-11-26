@@ -36,6 +36,12 @@ class ClaimExampleTests(unittest.TestCase):
         self.assertIn("✗ 91 is prime — 91 = 7 × 13", out)
         self.assertIn("✓ 10971 takes 267 steps", out)
 
+    def test_check_number_theory(self):
+        out = run("check_number_theory.py")
+        self.assertIn("✓ prime factorization of 360 is 2^3 × 3^2 × 5 — Python factors 360 = 2³ × 3² × 5", out)
+        self.assertIn("✗ 2^100 ≡ 1 (mod 7) — Python computes 2^100 mod 7 = 2", out)
+        self.assertIn("✓ The 100th prime is 541", out)
+
 
 if __name__ == "__main__":
     unittest.main()
